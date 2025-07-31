@@ -366,6 +366,179 @@ let generationCancelled = false;
 let generatedAudioFiles = [];
 let activeGenerationPromises = [];
 
+// Load audio generation state from localStorage on startup
+async function loadAudioGenerationState() {
+    try {
+        const savedState = localStorage.getItem('audioGenerationState');
+        if (savedState) {
+            const state = JSON.parse(savedState);
+            isGeneratingAudio = state.isGeneratingAudio || false;
+            generationCancelled = state.generationCancelled || false;
+            generatedAudioFiles = state.generatedAudioFiles || [];
+            
+            // Don't restore activeGenerationPromises as they can't be serialized
+            activeGenerationPromises = [];
+            
+            debugLog('Loaded audio generation state from localStorage:', state);
+            
+            // Restore audio blobs from IndexedDB for completed files
+            await restoreAudioBlobsFromIndexedDB();
+            
+            // Update UI to reflect restored state
+            if (generatedAudioFiles.length > 0) {
+                updateAudioFilesUI();
+                updateFailedChunksVisibility();
+            }
+            
+            // If generation was in progress, show appropriate UI
+            if (isGeneratingAudio && !generationCancelled) {
+                elements.generateAudioBtn.disabled = true;
+                elements.cancelGenerationBtn.disabled = false;
+                elements.audioProgress.classList.remove('hidden');
+            }
+        }
+    } catch (error) {
+        console.error('Error loading audio generation state:', error);
+        debugLog('Error loading audio generation state:', error);
+    }
+}
+
+// Restore audio blobs from IndexedDB for completed files
+async function restoreAudioBlobsFromIndexedDB() {
+    try {
+        for (const file of generatedAudioFiles) {
+            if (file.status === 'completed' && !file.audioBlob) {
+                const audioBlob = await loadAudioBlobFromIndexedDB(file.id);
+                if (audioBlob) {
+                    file.audioBlob = audioBlob;
+                    debugLog(`Restored audio blob for file ${file.id} from IndexedDB`);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error restoring audio blobs from IndexedDB:', error);
+        debugLog('Error restoring audio blobs from IndexedDB:', error);
+    }
+}
+
+// Save audio generation state to localStorage
+function saveAudioGenerationState() {
+    try {
+        const state = {
+            isGeneratingAudio,
+            generationCancelled,
+            generatedAudioFiles: generatedAudioFiles.map(file => ({
+                ...file,
+                // Don't save audioBlob as it's too large for localStorage
+                audioBlob: null
+            })),
+            timestamp: new Date().toISOString()
+        };
+        
+        localStorage.setItem('audioGenerationState', JSON.stringify(state));
+        debugLog('Saved audio generation state to localStorage');
+    } catch (error) {
+        console.error('Error saving audio generation state:', error);
+        debugLog('Error saving audio generation state:', error);
+    }
+}
+
+// Save audio blobs separately using IndexedDB for larger storage
+async function saveAudioBlobToIndexedDB(fileId, audioBlob) {
+    try {
+        const db = await openIndexedDB();
+        const transaction = db.transaction(['audioBlobs'], 'readwrite');
+        const store = transaction.objectStore('audioBlobs');
+        
+        await store.put({
+            id: fileId,
+            blob: audioBlob,
+            timestamp: new Date().toISOString()
+        });
+        
+        debugLog(`Saved audio blob for file ${fileId} to IndexedDB`);
+    } catch (error) {
+        console.error('Error saving audio blob to IndexedDB:', error);
+        debugLog('Error saving audio blob to IndexedDB:', error);
+    }
+}
+
+// Load audio blob from IndexedDB
+async function loadAudioBlobFromIndexedDB(fileId) {
+    try {
+        const db = await openIndexedDB();
+        const transaction = db.transaction(['audioBlobs'], 'readonly');
+        const store = transaction.objectStore('audioBlobs');
+        
+        const result = await store.get(fileId);
+        if (result) {
+            debugLog(`Loaded audio blob for file ${fileId} from IndexedDB`);
+            return result.blob;
+        }
+        return null;
+    } catch (error) {
+        console.error('Error loading audio blob from IndexedDB:', error);
+        debugLog('Error loading audio blob from IndexedDB:', error);
+        return null;
+    }
+}
+
+// Initialize IndexedDB
+async function openIndexedDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open('VoiceGeneratorDB', 1);
+        
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+        
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            
+            // Create object store for audio blobs
+            if (!db.objectStoreNames.contains('audioBlobs')) {
+                const store = db.createObjectStore('audioBlobs', { keyPath: 'id' });
+                store.createIndex('timestamp', 'timestamp', { unique: false });
+            }
+        };
+    });
+}
+
+// Clear audio generation state from localStorage
+function clearAudioGenerationState() {
+    try {
+        localStorage.removeItem('audioGenerationState');
+        debugLog('Cleared audio generation state from localStorage');
+    } catch (error) {
+        console.error('Error clearing audio generation state:', error);
+        debugLog('Error clearing audio generation state:', error);
+    }
+}
+
+// Clear only audio generation state (for starting new generation)
+async function clearAudioGenerationStateOnly() {
+    try {
+        // Clear from localStorage
+        localStorage.removeItem('audioGenerationState');
+        
+        // Clear from IndexedDB
+        await clearIndexedDB();
+        
+        // Reset state variables
+        generatedAudioFiles = [];
+        isGeneratingAudio = false;
+        generationCancelled = false;
+        activeGenerationPromises = [];
+        
+        // Update UI
+        updateAudioFilesUI();
+        
+        debugLog('Cleared audio generation state only');
+    } catch (error) {
+        console.error('Error clearing audio generation state only:', error);
+        debugLog('Error clearing audio generation state only:', error);
+    }
+}
+
 // Debug initial state
 debugLog('Initial vocabLists loaded:', vocabLists);
 
@@ -480,7 +653,7 @@ const elements = {
 console.log('modalImportDataBtn element:', elements.modalImportDataBtn);
 
 // Initialize the application
-function init() {
+async function init() {
     debugLog('Application initializing...');
     
     // Load API key from localStorage on startup
@@ -489,6 +662,9 @@ function init() {
         CONFIG.OPENAI_API_KEY = storedApiKey.trim();
         debugLog('API key loaded from localStorage on startup');
     }
+    
+    // Load audio generation state from localStorage
+    await loadAudioGenerationState();
     
     // Debug: Check if settings elements exist
     debugLog('Checking settings elements:');
@@ -762,7 +938,61 @@ function clearPastGenerations() {
 
 function saveGenerationToHistory(completedFiles, combinedFile) {
     debugLog('saveGenerationToHistory called');
-    // This function will be implemented later
+    
+    try {
+        // Create a new past generation entry
+        const generationEntry = {
+            id: Date.now().toString(),
+            timestamp: new Date().toISOString(),
+            title: currentList ? currentList.title : 'vocabulary_list',
+            completedFiles: completedFiles.length,
+            totalItems: completedFiles.reduce((total, file) => total + file.items, 0),
+            hasCombinedFile: !!combinedFile,
+            files: completedFiles.map(file => ({
+                id: file.id,
+                part: file.part,
+                items: file.items,
+                duration: file.audioDuration,
+                size: file.audioBlob ? file.audioBlob.size : 0
+            })),
+            combinedFile: combinedFile ? {
+                id: combinedFile.id,
+                items: combinedFile.items,
+                duration: combinedFile.audioDuration,
+                size: combinedFile.audioBlob ? combinedFile.audioBlob.size : 0
+            } : null
+        };
+        
+        // Add to past generations
+        pastGenerations.unshift(generationEntry);
+        
+        // Keep only the last 50 generations
+        if (pastGenerations.length > 50) {
+            pastGenerations = pastGenerations.slice(0, 50);
+        }
+        
+        // Save to localStorage
+        savePastGenerationsToStorage();
+        
+        // Clear current audio generation state
+        isGeneratingAudio = false;
+        generationCancelled = false;
+        generatedAudioFiles = [];
+        activeGenerationPromises = [];
+        
+        // Clear audio generation state from localStorage
+        clearAudioGenerationState();
+        
+        // Update UI
+        updateAudioFilesUI();
+        renderPastGenerations();
+        
+        debugLog('Generation saved to history successfully');
+        
+    } catch (error) {
+        console.error('Error saving generation to history:', error);
+        debugLog('Error saving generation to history:', error);
+    }
 }
 
 // Export/Import functions
@@ -2189,11 +2419,24 @@ async function generateAudio() {
         return;
     }
     
+    // Check if there's existing generation state and ask user if they want to clear it
+    if (generatedAudioFiles.length > 0 || isGeneratingAudio) {
+        const shouldClear = confirm('There is existing audio generation progress. Starting a new generation will clear the current progress. Do you want to continue?');
+        if (!shouldClear) {
+            return;
+        }
+        // Clear existing state
+        await clearAudioGenerationStateOnly();
+    }
+    
     // Reset generation state
     isGeneratingAudio = true;
     generationCancelled = false;
     generatedAudioFiles = [];
     activeGenerationPromises = [];
+    
+    // Save initial state to localStorage
+    saveAudioGenerationState();
     
     // Clear any previous failed chunks
     audioRetryManager.clearFailedChunks();
@@ -2330,6 +2573,9 @@ async function generateAudioParallel(chunks, itemsPerChunk) {
     // Update UI to show all pending files
     updateAudioFilesUI();
     
+    // Save initial file entries to localStorage
+    saveAudioGenerationState();
+    
     // Start all generation tasks in parallel
     const generationPromises = chunks.map(async (chunk, index) => {
         const fileEntry = generatedAudioFiles[index];
@@ -2368,6 +2614,16 @@ async function generateAudioParallel(chunks, itemsPerChunk) {
             fileEntry.endTime = Date.now();
             fileEntry.progress = 100;
             
+            // Save audio blob to IndexedDB
+            await saveAudioBlobToIndexedDB(fileEntry.id, audioBlob);
+            
+            // Calculate actual audio duration
+            const audioDuration = await calculateAudioDuration(audioBlob);
+            if (audioDuration !== null) {
+                fileEntry.audioDuration = audioDuration;
+                debugLog(`Calculated audio duration for chunk ${index + 1}: ${audioDuration}s`);
+            }
+            
             debugLog(`Parallel generation completed for chunk ${index + 1}`);
             
         } catch (error) {
@@ -2380,7 +2636,8 @@ async function generateAudioParallel(chunks, itemsPerChunk) {
             audioRetryManager.addToRetryQueue(index);
         }
         
-        // Update UI after each completion
+        // Save progress to localStorage and update UI after each completion
+        saveAudioGenerationState();
         updateAudioFilesUI();
     });
     
@@ -2423,6 +2680,9 @@ async function generateAudioSequential(chunks, itemsPerChunk) {
         generatedAudioFiles.push(fileEntry);
         updateAudioFilesUI();
         
+        // Save progress to localStorage
+        saveAudioGenerationState();
+        
         // Update progress bar
         const progress = ((i + 1) / chunks.length) * 100;
         const progressFill = elements.audioProgress.querySelector('.progress-fill');
@@ -2462,6 +2722,16 @@ async function generateAudioSequential(chunks, itemsPerChunk) {
             fileEntry.endTime = Date.now();
             fileEntry.progress = 100;
             
+            // Save audio blob to IndexedDB
+            await saveAudioBlobToIndexedDB(fileEntry.id, audioBlob);
+            
+            // Calculate actual audio duration
+            const audioDuration = await calculateAudioDuration(audioBlob);
+            if (audioDuration !== null) {
+                fileEntry.audioDuration = audioDuration;
+                debugLog(`Calculated audio duration for chunk ${i + 1}: ${audioDuration}s`);
+            }
+            
             debugLog(`Sequential generation completed for chunk ${i + 1}`);
             
         } catch (error) {
@@ -2475,6 +2745,9 @@ async function generateAudioSequential(chunks, itemsPerChunk) {
         }
         
         updateAudioFilesUI();
+        
+        // Save progress to localStorage after each chunk
+        saveAudioGenerationState();
         
         // Small delay between chunks
         if (i < chunks.length - 1 && !generationCancelled) {
@@ -2591,7 +2864,7 @@ async function retryFailedChunks(chunkIndices) {
         const results = await audioRetryManager.retryFailedChunks(chunkIndices);
         
         // Update UI for successful retries
-        results.forEach(result => {
+        for (const result of results) {
             if (result.success) {
                 // Update the corresponding file entry
                 const fileEntry = generatedAudioFiles.find(f => f.part === result.chunkIndex + 1);
@@ -2601,14 +2874,20 @@ async function retryFailedChunks(chunkIndices) {
                     fileEntry.error = null;
                     fileEntry.endTime = Date.now();
                     fileEntry.progress = 100;
+                    
+                    // Save audio blob to IndexedDB
+                    await saveAudioBlobToIndexedDB(fileEntry.id, result.audioBlob);
                 }
             }
-        });
+        }
         
         // Update UI
         updateAudioFilesUI();
         showFailedChunksUI();
         updateFailedChunksVisibility();
+        
+        // Save progress to localStorage after retry
+        saveAudioGenerationState();
         
         // Show results
         const successful = results.filter(r => r.success).length;
@@ -2676,6 +2955,9 @@ async function generateCombinedAudioFile(completedFiles) {
     generatedAudioFiles.push(combinedFileEntry);
     updateAudioFilesUI();
     
+    // Save progress to localStorage
+    saveAudioGenerationState();
+    
     try {
         // Update progress to show combining
         const progressFill = elements.audioProgress.querySelector('.progress-fill');
@@ -2705,6 +2987,16 @@ async function generateCombinedAudioFile(completedFiles) {
         combinedFileEntry.endTime = Date.now();
         combinedFileEntry.progress = 100;
         
+        // Save combined audio blob to IndexedDB
+        await saveAudioBlobToIndexedDB(combinedFileEntry.id, combinedBlob);
+        
+        // Calculate actual audio duration for combined file
+        const audioDuration = await calculateAudioDuration(combinedBlob);
+        if (audioDuration !== null) {
+            combinedFileEntry.audioDuration = audioDuration;
+            debugLog(`Calculated combined audio duration: ${audioDuration}s`);
+        }
+        
         debugLog('Combined audio file generated successfully');
         debugLog('Combined file size:', combinedBlob.size);
         
@@ -2722,6 +3014,9 @@ async function generateCombinedAudioFile(completedFiles) {
     }
     
     updateAudioFilesUI();
+    
+    // Save progress to localStorage after combined file generation
+    saveAudioGenerationState();
 }
 
 function cancelAudioGeneration() {
@@ -2744,6 +3039,9 @@ function cancelAudioGeneration() {
         });
         
         updateAudioFilesUI();
+        
+        // Save cancelled state to localStorage
+        saveAudioGenerationState();
         
         elements.cancelGenerationBtn.disabled = true;
         elements.cancelGenerationBtn.innerHTML = '<i class="fas fa-stop"></i> Cancelling...';
@@ -2771,8 +3069,14 @@ function createAudioFileElement(file) {
     
     const statusIcon = getStatusIcon(file.status);
     const statusClass = getStatusClass(file.status);
-    const duration = file.startTime && file.endTime ? 
-        Math.round((file.endTime - file.startTime) / 1000) : null;
+    
+    // Use actual audio duration if available, otherwise fall back to generation time
+    let duration = null;
+    if (file.audioDuration !== undefined) {
+        duration = Math.round(file.audioDuration);
+    } else if (file.startTime && file.endTime) {
+        duration = Math.round((file.endTime - file.startTime) / 1000);
+    }
     
     div.innerHTML = `
         <div class="audio-file-header">
@@ -3240,6 +3544,21 @@ async function generateTTSAudioWithRetry(text, voice, language) {
     return await audioRetryManager.retryTTSRequest(text, voice, language);
 }
 
+// Calculate actual audio duration from audio blob
+async function calculateAudioDuration(audioBlob) {
+    try {
+        const arrayBuffer = await audioBlob.arrayBuffer();
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+        const duration = audioBuffer.duration;
+        audioContext.close();
+        return duration;
+    } catch (error) {
+        debugLog('Error calculating audio duration:', error);
+        return null;
+    }
+}
+
 function getVoiceInstructions(language) {
     switch (language) {
         case 'Dutch':
@@ -3629,19 +3948,51 @@ function updateDebugInfo() {
     debugLog('Debug info updated');
 }
 
-function clearLocalStorage() {
+async function clearLocalStorage() {
     debugLog('clearLocalStorage called');
     if (confirm('Are you sure you want to clear all stored data? This cannot be undone.')) {
         localStorage.clear();
         vocabLists = [];
+        pastGenerations = [];
+        generatedAudioFiles = [];
+        isGeneratingAudio = false;
+        generationCancelled = false;
+        activeGenerationPromises = [];
         currentList = null;
         currentVocabItem = null;
         selectedFile = null;
         CONFIG.OPENAI_API_KEY = null; // Clear API key from config
+        
+        // Clear audio generation state
+        clearAudioGenerationState();
+        
+        // Clear IndexedDB
+        await clearIndexedDB();
+        
+        // Update UI
         renderVocabLists();
+        renderPastGenerations();
+        updateAudioFilesUI();
         updateDebugInfo();
-        debugLog('LocalStorage cleared');
+        updateUI();
+        
+        debugLog('All data cleared successfully');
         alert('All stored data has been cleared.');
+    }
+}
+
+// Clear all data from IndexedDB
+async function clearIndexedDB() {
+    try {
+        const db = await openIndexedDB();
+        const transaction = db.transaction(['audioBlobs'], 'readwrite');
+        const store = transaction.objectStore('audioBlobs');
+        
+        await store.clear();
+        debugLog('IndexedDB cleared successfully');
+    } catch (error) {
+        console.error('Error clearing IndexedDB:', error);
+        debugLog('Error clearing IndexedDB:', error);
     }
 }
 
