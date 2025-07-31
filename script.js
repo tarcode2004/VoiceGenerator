@@ -323,6 +323,7 @@ const elements = {
     // Export/Import modal elements
     exportDataBtn: document.getElementById('exportDataBtn'),
     importDataBtn: document.getElementById('importDataBtn'),
+    modalImportDataBtn: document.getElementById('modalImportDataBtn'),
     exportImportModal: document.getElementById('exportImportModal'),
     exportVocabLists: document.getElementById('exportVocabLists'),
     exportPastGenerations: document.getElementById('exportPastGenerations'),
@@ -334,6 +335,9 @@ const elements = {
     closeExportImportModal: document.getElementById('closeExportImportModal'),
     closeExportImportBtn: document.getElementById('closeExportImportBtn')
 };
+
+// Debug: Check if modal import button is found
+console.log('modalImportDataBtn element:', elements.modalImportDataBtn);
 
 // Initialize the application
 function init() {
@@ -505,7 +509,7 @@ function setupEventListeners() {
     
     if (elements.importDataBtn) {
         elements.importDataBtn.addEventListener('click', openExportImportModal);
-        debugLog('Import data button event listener added');
+        debugLog('Import data button (header) event listener added');
     } else {
         debugLog('ERROR: importDataBtn element not found!');
     }
@@ -573,8 +577,13 @@ function setupEventListeners() {
         elements.exportDataBtn.addEventListener('click', exportData);
     }
     
-    if (elements.importDataBtn) {
-        elements.importDataBtn.addEventListener('click', importData);
+    if (elements.modalImportDataBtn) {
+        elements.modalImportDataBtn.addEventListener('click', importData);
+        debugLog('Modal import data button event listener added');
+        console.log('Modal import button found and event listener attached');
+    } else {
+        debugLog('ERROR: modalImportDataBtn element not found!');
+        console.error('modalImportDataBtn element not found!');
     }
     
     // API key input change event
@@ -672,6 +681,7 @@ function exportData() {
 
 function importData() {
     debugLog('Importing data...');
+    console.log('importData function called!'); // Add immediate console log
     
     const importString = elements.importDataInput.value.trim();
     
