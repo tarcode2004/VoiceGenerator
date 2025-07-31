@@ -17,6 +17,12 @@
                     <p>Learn Dutch vocabulary with audio in Turkish and Russian</p>
                 </div>
                 <div class="header-right">
+                    <button id="exportDataBtn" class="btn btn-secondary" title="Export Data">
+                        <i class="fas fa-download"></i> Export
+                    </button>
+                    <button id="importDataBtn" class="btn btn-secondary" title="Import Data">
+                        <i class="fas fa-upload"></i> Import
+                    </button>
                     <button id="settingsBtn" class="btn btn-secondary" title="Settings">
                         <i class="fas fa-cog"></i> Settings
                     </button>
@@ -330,6 +336,63 @@
             <div class="modal-footer">
                 <button id="saveSettingsBtn" class="btn btn-primary">Save Settings</button>
                 <button id="cancelSettingsBtn" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="exportImportModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-exchange-alt"></i> Export / Import Data</h3>
+                <button class="close-btn" id="closeExportImportModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="export-section">
+                    <h4><i class="fas fa-download"></i> Export Data</h4>
+                    <p>Export your vocabulary lists, past generations, and API key to transfer between devices or domains.</p>
+                    <div class="export-options">
+                        <label>
+                            <input type="checkbox" id="exportVocabLists" checked> Vocabulary Lists
+                        </label>
+                        <label>
+                            <input type="checkbox" id="exportPastGenerations" checked> Past Generations
+                        </label>
+                        <label>
+                            <input type="checkbox" id="exportApiKey" checked> API Key
+                        </label>
+                    </div>
+                    <button id="exportDataBtn" class="btn btn-primary">
+                        <i class="fas fa-download"></i> Export Data
+                    </button>
+                </div>
+                
+                <hr style="margin: 30px 0;">
+                
+                <div class="import-section">
+                    <h4><i class="fas fa-upload"></i> Import Data</h4>
+                    <p>Import previously exported data. This will merge with your existing data.</p>
+                    <div class="form-group">
+                        <label for="importDataInput">Paste exported data:</label>
+                        <textarea id="importDataInput" rows="8" placeholder="Paste your exported data here..."></textarea>
+                    </div>
+                    <div class="import-options">
+                        <label>
+                            <input type="checkbox" id="importVocabLists" checked> Import Vocabulary Lists
+                        </label>
+                        <label>
+                            <input type="checkbox" id="importPastGenerations" checked> Import Past Generations
+                        </label>
+                        <label>
+                            <input type="checkbox" id="importApiKey" checked> Import API Key
+                        </label>
+                    </div>
+                    <button id="importDataBtn" class="btn btn-primary">
+                        <i class="fas fa-upload"></i> Import Data
+                    </button>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="closeExportImportBtn" class="btn btn-secondary">Close</button>
             </div>
         </div>
     </div>

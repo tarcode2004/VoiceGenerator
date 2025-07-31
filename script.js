@@ -318,7 +318,21 @@ const elements = {
     apiKeyStatusText: document.getElementById('apiKeyStatusText'),
     saveSettingsBtn: document.getElementById('saveSettingsBtn'),
     cancelSettingsBtn: document.getElementById('cancelSettingsBtn'),
-    closeSettingsModal: document.getElementById('closeSettingsModal')
+    closeSettingsModal: document.getElementById('closeSettingsModal'),
+    
+    // Export/Import modal elements
+    exportDataBtn: document.getElementById('exportDataBtn'),
+    importDataBtn: document.getElementById('importDataBtn'),
+    exportImportModal: document.getElementById('exportImportModal'),
+    exportVocabLists: document.getElementById('exportVocabLists'),
+    exportPastGenerations: document.getElementById('exportPastGenerations'),
+    exportApiKey: document.getElementById('exportApiKey'),
+    importDataInput: document.getElementById('importDataInput'),
+    importVocabLists: document.getElementById('importVocabLists'),
+    importPastGenerations: document.getElementById('importPastGenerations'),
+    importApiKey: document.getElementById('importApiKey'),
+    closeExportImportModal: document.getElementById('closeExportImportModal'),
+    closeExportImportBtn: document.getElementById('closeExportImportBtn')
 };
 
 // Initialize the application
@@ -480,6 +494,22 @@ function setupEventListeners() {
         elements.chunkSize.addEventListener('change', updateParallelProcessingConfig);
     }
     
+    // Export/Import functionality
+    debugLog('Setting up export/import event listeners...');
+    if (elements.exportDataBtn) {
+        elements.exportDataBtn.addEventListener('click', openExportImportModal);
+        debugLog('Export data button event listener added');
+    } else {
+        debugLog('ERROR: exportDataBtn element not found!');
+    }
+    
+    if (elements.importDataBtn) {
+        elements.importDataBtn.addEventListener('click', openExportImportModal);
+        debugLog('Import data button event listener added');
+    } else {
+        debugLog('ERROR: importDataBtn element not found!');
+    }
+    
     // Settings functionality
     debugLog('Setting up settings event listeners...');
     if (elements.settingsBtn) {
@@ -524,6 +554,29 @@ function setupEventListeners() {
         });
     }
     
+    // Export/Import modal event listeners
+    if (elements.exportImportModal) {
+        elements.exportImportModal.addEventListener('click', (e) => {
+            if (e.target === elements.exportImportModal) closeExportImportModal();
+        });
+    }
+    
+    if (elements.closeExportImportModal) {
+        elements.closeExportImportModal.addEventListener('click', closeExportImportModal);
+    }
+    
+    if (elements.closeExportImportBtn) {
+        elements.closeExportImportBtn.addEventListener('click', closeExportImportModal);
+    }
+    
+    if (elements.exportDataBtn) {
+        elements.exportDataBtn.addEventListener('click', exportData);
+    }
+    
+    if (elements.importDataBtn) {
+        elements.importDataBtn.addEventListener('click', importData);
+    }
+    
     // API key input change event
     if (elements.apiKeyInput) {
         elements.apiKeyInput.addEventListener('input', debounce(checkApiKeyStatus, 1000));
@@ -561,6 +614,122 @@ function clearPastGenerations() {
 function saveGenerationToHistory(completedFiles, combinedFile) {
     debugLog('saveGenerationToHistory called');
     // This function will be implemented later
+}
+
+// Export/Import functions
+function openExportImportModal() {
+    debugLog('Opening export/import modal');
+    elements.exportImportModal.classList.remove('hidden');
+}
+
+function closeExportImportModal() {
+    debugLog('Closing export/import modal');
+    elements.exportImportModal.classList.add('hidden');
+    elements.importDataInput.value = '';
+}
+
+function exportData() {
+    debugLog('Exporting data...');
+    
+    const exportData = {
+        version: '1.0',
+        timestamp: new Date().toISOString(),
+        data: {}
+    };
+    
+    // Export selected data
+    if (elements.exportVocabLists && elements.exportVocabLists.checked) {
+        exportData.data.vocabLists = JSON.parse(localStorage.getItem('vocabLists') || '[]');
+    }
+    
+    if (elements.exportPastGenerations && elements.exportPastGenerations.checked) {
+        exportData.data.pastGenerations = JSON.parse(localStorage.getItem('pastGenerations') || '[]');
+    }
+    
+    if (elements.exportApiKey && elements.exportApiKey.checked) {
+        const apiKey = localStorage.getItem('openai_api_key');
+        if (apiKey) {
+            exportData.data.apiKey = apiKey;
+        }
+    }
+    
+    const exportString = JSON.stringify(exportData, null, 2);
+    
+    // Create download link
+    const blob = new Blob([exportString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `vocab-generator-export-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    debugLog('Data exported successfully');
+    alert('Data exported successfully!');
+}
+
+function importData() {
+    debugLog('Importing data...');
+    
+    const importString = elements.importDataInput.value.trim();
+    
+    if (!importString) {
+        alert('Please paste the exported data first.');
+        return;
+    }
+    
+    try {
+        const importData = JSON.parse(importString);
+        
+        if (!importData.data) {
+            throw new Error('Invalid export format');
+        }
+        
+        let importedCount = 0;
+        
+        // Import selected data
+        if (elements.importVocabLists && elements.importVocabLists.checked && importData.data.vocabLists) {
+            const existingVocabLists = JSON.parse(localStorage.getItem('vocabLists') || '[]');
+            const mergedVocabLists = [...existingVocabLists, ...importData.data.vocabLists];
+            localStorage.setItem('vocabLists', JSON.stringify(mergedVocabLists));
+            vocabLists = mergedVocabLists;
+            importedCount += importData.data.vocabLists.length;
+            debugLog(`Imported ${importData.data.vocabLists.length} vocabulary lists`);
+        }
+        
+        if (elements.importPastGenerations && elements.importPastGenerations.checked && importData.data.pastGenerations) {
+            const existingPastGenerations = JSON.parse(localStorage.getItem('pastGenerations') || '[]');
+            const mergedPastGenerations = [...existingPastGenerations, ...importData.data.pastGenerations];
+            localStorage.setItem('pastGenerations', JSON.stringify(mergedPastGenerations));
+            pastGenerations = mergedPastGenerations;
+            importedCount += importData.data.pastGenerations.length;
+            debugLog(`Imported ${importData.data.pastGenerations.length} past generations`);
+        }
+        
+        if (elements.importApiKey && elements.importApiKey.checked && importData.data.apiKey) {
+            localStorage.setItem('openai_api_key', importData.data.apiKey);
+            CONFIG.OPENAI_API_KEY = importData.data.apiKey;
+            importedCount++;
+            debugLog('Imported API key');
+        }
+        
+        // Refresh the UI
+        renderVocabLists();
+        renderPastGenerations();
+        updateUI();
+        
+        debugLog('Data imported successfully');
+        alert(`Data imported successfully! ${importedCount} items imported.`);
+        
+        // Close the modal
+        closeExportImportModal();
+        
+    } catch (error) {
+        debugLog('Error importing data:', error);
+        alert(`Error importing data: ${error.message}`);
+    }
 }
 
 // Vocabulary list management
