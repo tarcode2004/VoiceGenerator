@@ -1,0 +1,33 @@
+# API Keys and sensitive data
+*.env
+.env
+.env.local
+.env.production
+config.json
+secrets.json
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Node modules (if using npm)
+node_modules/
+
+# Python cache (if using Python)
+__pycache__/
+*.pyc
+*.pyo 
