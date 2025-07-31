@@ -466,15 +466,42 @@ async function saveAudioBlobToIndexedDB(fileId, audioBlob) {
 // Load audio blob from IndexedDB
 async function loadAudioBlobFromIndexedDB(fileId) {
     try {
+        console.log(`🔍 loadAudioBlobFromIndexedDB called with fileId: "${fileId}"`);
+        
+        // Create a fresh connection and transaction for each lookup
         const db = await openIndexedDB();
         const transaction = db.transaction(['audioBlobs'], 'readonly');
         const store = transaction.objectStore('audioBlobs');
         
-        const result = await store.get(fileId);
+        // Use Promise to properly handle the async IndexedDB request
+        const result = await new Promise((resolve, reject) => {
+            // Try to convert string fileId to number if it's numeric
+            let keyToLookup = fileId;
+            if (typeof fileId === 'string' && !isNaN(fileId) && fileId !== 'combined') {
+                keyToLookup = parseInt(fileId);
+                console.log(`🔄 Converting string fileId "${fileId}" to numeric key: ${keyToLookup}`);
+            }
+            
+            const request = store.get(keyToLookup);
+            request.onsuccess = () => {
+                console.log(`📊 IndexedDB request completed for "${fileId}" (looked up key: ${keyToLookup})`);
+                resolve(request.result);
+            };
+            request.onerror = () => {
+                console.error(`❌ IndexedDB request failed for "${fileId}":`, request.error);
+                reject(request.error);
+            };
+        });
+        
+        console.log(`📊 IndexedDB result for "${fileId}":`, result ? 'FOUND' : 'NOT FOUND');
         if (result) {
-            debugLog(`Loaded audio blob for file ${fileId} from IndexedDB`);
+            console.log(`📦 Full result object:`, result);
+            console.log(`🔍 result.blob:`, result.blob);
+            console.log(`📏 result.blob.size:`, result.blob ? result.blob.size : 'N/A');
+            console.log(`✅ Loaded audio blob for file "${fileId}" from IndexedDB, size: ${result.blob ? result.blob.size : 'N/A'} bytes`);
             return result.blob;
         }
+        console.log(`❌ No result found for fileId: "${fileId}"`);
         return null;
     } catch (error) {
         console.error('Error loading audio blob from IndexedDB:', error);
@@ -674,6 +701,10 @@ async function init() {
     
     renderVocabLists();
     renderPastGenerations();
+    
+    // Debug: List all IndexedDB files on startup
+    debugListIndexedDBFiles();
+    
     setupEventListeners();
     initParallelProcessingConfig();
     updateUI();
@@ -917,12 +948,83 @@ function setupEventListeners() {
 // Missing functions for past generations
 function renderPastGenerations() {
     debugLog('renderPastGenerations called');
-    // This function will be implemented later
+    
+    const container = elements.pastGenerationsList;
+    if (!container) {
+        debugLog('Past generations container not found');
+        return;
+    }
+    
+    if (pastGenerations.length === 0) {
+        container.innerHTML = '<div class="empty-past-generations">No past generations found. Generate some audio to see them here.</div>';
+        return;
+    }
+    
+    container.innerHTML = pastGenerations.map((generation, index) => {
+        const date = new Date(generation.timestamp);
+        const formattedDate = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+        
+        // Create file list HTML
+        const filesHtml = generation.files.map(file => {
+            const isCombined = file.id === 'combined';
+            const fileClass = isCombined ? 'past-generation-file combined-file' : 'past-generation-file';
+            const fileTitle = isCombined ? 'Combined File' : `Part ${file.part}`;
+            const duration = file.duration ? formatTime(file.duration) : 'Unknown';
+            const size = file.size ? formatFileSize(file.size) : 'Unknown';
+            
+            return `
+                <div class="${fileClass}">
+                    <div class="past-generation-file-info">
+                        <span class="past-generation-file-title">${fileTitle}</span>
+                        <span class="past-generation-file-details">
+                            ${file.items} items • ${duration} • ${size}
+                        </span>
+                    </div>
+                    <div class="past-generation-file-actions">
+                        <button class="btn btn-sm btn-primary" onclick="downloadPastGenerationFile('${generation.id}', '${file.id}')">
+                            <i class="fas fa-download"></i> Download
+                        </button>
+                        <button class="btn btn-sm btn-secondary" onclick="playPastGenerationFile('${generation.id}', '${file.id}')">
+                            <i class="fas fa-play"></i> Play
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        
+        return `
+            <div class="past-generation-item">
+                <div class="past-generation-header">
+                    <div class="past-generation-info">
+                        <div class="past-generation-title">${escapeHtml(generation.title)}</div>
+                        <div class="past-generation-meta">
+                            <span><i class="fas fa-calendar"></i> ${formattedDate}</span>
+                            <span><i class="fas fa-file-audio"></i> ${generation.completedFiles} files</span>
+                            <span><i class="fas fa-list"></i> ${generation.totalItems} items</span>
+                            ${generation.hasCombinedFile ? '<span><i class="fas fa-link"></i> Combined file available</span>' : ''}
+                        </div>
+                    </div>
+                    <div class="past-generation-actions">
+                        <button class="btn btn-sm btn-secondary" onclick="deletePastGeneration(${index})">
+                            <i class="fas fa-trash"></i> Delete
+                        </button>
+                    </div>
+                </div>
+                <div class="past-generation-files">
+                    ${filesHtml}
+                </div>
+            </div>
+        `;
+    }).join('');
+    
+    debugLog(`Rendered ${pastGenerations.length} past generations`);
 }
 
 function refreshPastGenerations() {
     debugLog('refreshPastGenerations called');
-    // This function will be implemented later
+    // Reload past generations from localStorage
+    pastGenerations = JSON.parse(localStorage.getItem('pastGenerations') || '[]');
+    renderPastGenerations();
 }
 
 function clearPastGenerations() {
@@ -936,7 +1038,7 @@ function clearPastGenerations() {
     }
 }
 
-function saveGenerationToHistory(completedFiles, combinedFile) {
+async function saveGenerationToHistory(completedFiles, combinedFile) {
     debugLog('saveGenerationToHistory called');
     
     try {
@@ -948,13 +1050,23 @@ function saveGenerationToHistory(completedFiles, combinedFile) {
             completedFiles: completedFiles.length,
             totalItems: completedFiles.reduce((total, file) => total + file.items, 0),
             hasCombinedFile: !!combinedFile,
-            files: completedFiles.map(file => ({
-                id: file.id,
-                part: file.part,
-                items: file.items,
-                duration: file.audioDuration,
-                size: file.audioBlob ? file.audioBlob.size : 0
-            })),
+            files: [
+                ...completedFiles.map(file => ({
+                    id: file.id,
+                    part: file.part,
+                    items: file.items,
+                    duration: file.audioDuration,
+                    size: file.audioBlob ? file.audioBlob.size : 0
+                })),
+                // Add combined file to the files array if it exists
+                ...(combinedFile ? [{
+                    id: combinedFile.id,
+                    part: 'Combined',
+                    items: combinedFile.items,
+                    duration: combinedFile.audioDuration,
+                    size: combinedFile.audioBlob ? combinedFile.audioBlob.size : 0
+                }] : [])
+            ],
             combinedFile: combinedFile ? {
                 id: combinedFile.id,
                 items: combinedFile.items,
@@ -973,6 +1085,18 @@ function saveGenerationToHistory(completedFiles, combinedFile) {
         
         // Save to localStorage
         savePastGenerationsToStorage();
+        
+        // Save individual files to IndexedDB with generation ID prefixes
+        for (const file of completedFiles) {
+            if (file.audioBlob) {
+                await saveAudioBlobToIndexedDB(`${generationEntry.id}_${file.id}`, file.audioBlob);
+            }
+        }
+        
+        // Save combined file to IndexedDB with generation ID if it exists
+        if (combinedFile && combinedFile.audioBlob) {
+            await saveAudioBlobToIndexedDB(`${generationEntry.id}_combined`, combinedFile.audioBlob);
+        }
         
         // Clear current audio generation state
         isGeneratingAudio = false;
@@ -2507,7 +2631,7 @@ async function generateAudio() {
             
             if (completedFiles.length > 0) {
                 // Save the generation to past generations
-                saveGenerationToHistory(completedFiles, combinedFile);
+                await saveGenerationToHistory(completedFiles, combinedFile);
                 
                 let message = `Audio generation completed! ${completedFiles.length} file${completedFiles.length > 1 ? 's' : ''} generated successfully.`;
                 if (combinedFile) {
@@ -4021,4 +4145,287 @@ function initParallelProcessingConfig() {
 }
 
 // Initialize when DOM is loaded
-document.addEventListener('DOMContentLoaded', init); 
+document.addEventListener('DOMContentLoaded', init);
+
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+async function downloadPastGenerationFile(generationId, fileId) {
+    debugLog(`Downloading past generation file: ${generationId}, ${fileId}`);
+    
+    try {
+        console.log(`🔍 Looking for generation with ID: "${generationId}"`);
+        console.log(`📊 Available generations:`, pastGenerations.map(g => g.id));
+        
+        // Find the generation
+        const generation = pastGenerations.find(g => g.id === generationId);
+        if (!generation) {
+            console.log(`❌ Generation not found: "${generationId}"`);
+            alert('Generation not found');
+            return;
+        }
+        
+        console.log(`✅ Generation found:`, generation.title);
+        console.log(`📁 Files in generation:`, generation.files.map(f => f.id));
+        
+        // Find the file - handle both string and numeric IDs
+        let file = generation.files.find(f => f.id === fileId);
+        
+        // If not found and fileId is a string that could be a number, try converting to number
+        if (!file && !isNaN(fileId) && fileId !== 'combined') {
+            const numericFileId = parseInt(fileId);
+            console.log(`🔄 Trying numeric fileId: ${numericFileId}`);
+            file = generation.files.find(f => f.id === numericFileId);
+        }
+        
+        if (!file) {
+            console.log(`❌ File not found in generation: "${fileId}"`);
+            alert('File not found');
+            return;
+        }
+        
+        console.log(`✅ File found in generation:`, file);
+        
+        // Try to load the audio blob from IndexedDB with different ID formats
+        let audioBlob = null;
+        
+        // First try the new format (with generation ID prefix)
+        audioBlob = await loadAudioBlobFromIndexedDB(`${generationId}_${fileId}`);
+        
+        // If not found, try the old format (just the file ID)
+        if (!audioBlob) {
+            audioBlob = await loadAudioBlobFromIndexedDB(fileId);
+        }
+        
+        // If still not found, try the old format for combined files
+        if (!audioBlob && fileId === 'combined') {
+            audioBlob = await loadAudioBlobFromIndexedDB('combined');
+        }
+        
+        if (!audioBlob) {
+            alert('Audio file not found in storage. It may have been cleared or the file format has changed.');
+            return;
+        }
+        
+        // Create download link
+        const url = URL.createObjectURL(audioBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${generation.title}_${fileId === 'combined' ? 'combined' : `part${file.part}`}.wav`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        debugLog('Past generation file downloaded successfully');
+        
+    } catch (error) {
+        console.error('Error downloading past generation file:', error);
+        alert('Error downloading file: ' + error.message);
+    }
+}
+
+async function playPastGenerationFile(generationId, fileId) {
+    debugLog(`Playing past generation file: ${generationId}, ${fileId}`);
+    
+    try {
+        // Find the generation
+        const generation = pastGenerations.find(g => g.id === generationId);
+        if (!generation) {
+            alert('Generation not found');
+            return;
+        }
+        
+        // Find the file
+        const file = generation.files.find(f => f.id === fileId);
+        if (!file) {
+            alert('File not found');
+            return;
+        }
+        
+        // Try to load the audio blob from IndexedDB with different ID formats
+        let audioBlob = null;
+        
+        // First try the new format (with generation ID prefix)
+        audioBlob = await loadAudioBlobFromIndexedDB(`${generationId}_${fileId}`);
+        
+        // If not found, try the old format (just the file ID)
+        if (!audioBlob) {
+            audioBlob = await loadAudioBlobFromIndexedDB(fileId);
+        }
+        
+        // If still not found, try the old format for combined files
+        if (!audioBlob && fileId === 'combined') {
+            audioBlob = await loadAudioBlobFromIndexedDB('combined');
+        }
+        
+        if (!audioBlob) {
+            alert('Audio file not found in storage. It may have been cleared or the file format has changed.');
+            return;
+        }
+        
+        // Create audio element and play
+        const audio = new Audio(URL.createObjectURL(audioBlob));
+        audio.controls = true;
+        audio.style.width = '100%';
+        audio.style.marginTop = '10px';
+        
+        // Create a modal or container to show the audio player
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        `;
+        
+        const content = document.createElement('div');
+        content.style.cssText = `
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            max-width: 500px;
+            width: 90%;
+        `;
+        
+        const title = document.createElement('h3');
+        title.textContent = `${generation.title} - ${fileId === 'combined' ? 'Combined File' : `Part ${file.part}`}`;
+        title.style.marginBottom = '15px';
+        
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = 'Close';
+        closeBtn.className = 'btn btn-secondary';
+        closeBtn.style.marginTop = '15px';
+        closeBtn.onclick = () => {
+            document.body.removeChild(modal);
+            URL.revokeObjectURL(audio.src);
+        };
+        
+        content.appendChild(title);
+        content.appendChild(audio);
+        content.appendChild(closeBtn);
+        modal.appendChild(content);
+        document.body.appendChild(modal);
+        
+        // Auto-play the audio
+        audio.play().catch(e => {
+            console.log('Auto-play prevented:', e);
+        });
+        
+        debugLog('Past generation file playing');
+        
+    } catch (error) {
+        console.error('Error playing past generation file:', error);
+        alert('Error playing file: ' + error.message);
+    }
+}
+
+function deletePastGeneration(index) {
+    debugLog(`Deleting past generation at index: ${index}`);
+    
+    if (confirm('Are you sure you want to delete this generation? This cannot be undone.')) {
+        const generation = pastGenerations[index];
+        if (!generation) {
+            alert('Generation not found');
+            return;
+        }
+        
+        // Remove from array
+        pastGenerations.splice(index, 1);
+        
+        // Save to localStorage
+        savePastGenerationsToStorage();
+        
+        // Re-render
+        renderPastGenerations();
+        
+        debugLog('Past generation deleted successfully');
+    }
+}
+
+// Debug function to list all stored audio files in IndexedDB
+async function debugListIndexedDBFiles() {
+    try {
+        const db = await openIndexedDB();
+        const transaction = db.transaction(['audioBlobs'], 'readonly');
+        const store = transaction.objectStore('audioBlobs');
+        
+        const request = store.getAll();
+        
+        request.onsuccess = () => {
+            const files = request.result;
+            console.log('=== IndexedDB Audio Files ===');
+            console.log(`Total files stored: ${files.length}`);
+            files.forEach((file, index) => {
+                console.log(`${index + 1}. ID: "${file.id}", Size: ${file.blob ? file.blob.size : 'N/A'} bytes, Timestamp: ${file.timestamp}`);
+            });
+            console.log('=== End IndexedDB Files ===');
+        };
+        
+        request.onerror = () => {
+            console.error('Error reading IndexedDB files:', request.error);
+        };
+    } catch (error) {
+        console.error('Error opening IndexedDB for debugging:', error);
+    }
+}
+
+// Add this to the global scope so it can be called from console
+window.debugListIndexedDBFiles = debugListIndexedDBFiles;
+
+// Test function to check IndexedDB access
+async function testIndexedDBAccess() {
+    console.log('🧪 Testing IndexedDB access...');
+    
+    try {
+        const db = await openIndexedDB();
+        console.log('✅ IndexedDB opened successfully');
+        
+        const transaction = db.transaction(['audioBlobs'], 'readonly');
+        const store = transaction.objectStore('audioBlobs');
+        console.log('✅ Transaction and store created successfully');
+        
+        // Try to get all keys
+        const keysRequest = store.getAllKeys();
+        const keys = await new Promise((resolve, reject) => {
+            keysRequest.onsuccess = () => resolve(keysRequest.result);
+            keysRequest.onerror = () => reject(keysRequest.error);
+        });
+        
+        console.log('🔑 Available keys in IndexedDB:', keys);
+        
+        // Try to get a specific file
+        if (keys.length > 0) {
+            const testKey = keys[0];
+            console.log(`🧪 Testing lookup for key: "${testKey}"`);
+            
+            const result = await new Promise((resolve, reject) => {
+                const request = store.get(testKey);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+            
+            console.log(`📦 Result for "${testKey}":`, result);
+            if (result) {
+                console.log(`📏 Blob size: ${result.blob ? result.blob.size : 'N/A'}`);
+            }
+        }
+        
+    } catch (error) {
+        console.error('❌ Error testing IndexedDB:', error);
+    }
+}
+
+// Add to global scope for debugging
+window.testIndexedDBAccess = testIndexedDBAccess;
