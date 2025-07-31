@@ -1197,6 +1197,128 @@ section {
     transform: scale(1.1);
 }
 
+/* Failed chunks section */
+.failed-chunks-section {
+    background: #fff3cd;
+    border: 1px solid #ffeaa7;
+    border-radius: 12px;
+    padding: 20px;
+    margin-top: 20px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.failed-chunks-section h3 {
+    color: #856404;
+    margin-bottom: 15px;
+    font-size: 1.2rem;
+    font-weight: 600;
+}
+
+.failed-chunks-list {
+    margin-bottom: 15px;
+}
+
+.failed-chunk-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px;
+    background: white;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    border: 1px solid #ffeaa7;
+    transition: all 0.2s ease;
+}
+
+.failed-chunk-item:hover {
+    border-color: #fdcb6e;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.failed-chunk-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+}
+
+.chunk-select {
+    margin: 0;
+}
+
+.chunk-title {
+    font-weight: 500;
+    color: #2d3748;
+    min-width: 120px;
+}
+
+.chunk-error {
+    color: #e53e3e;
+    font-size: 0.9rem;
+    flex: 1;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chunk-attempts {
+    color: #718096;
+    font-size: 0.85rem;
+    min-width: 80px;
+}
+
+.failed-chunks-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.failed-chunks-actions .btn {
+    font-size: 0.9rem;
+    padding: 8px 16px;
+}
+
+.btn-warning {
+    background: #f6ad55;
+    color: white;
+}
+
+.btn-warning:hover {
+    background: #ed8936;
+}
+
+.btn-warning:disabled {
+    background: #cbd5e0;
+    cursor: not-allowed;
+}
+
+/* Responsive design for failed chunks */
+@media (max-width: 768px) {
+    .failed-chunk-item {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+    }
+    
+    .failed-chunk-info {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+        width: 100%;
+    }
+    
+    .chunk-error {
+        max-width: none;
+        white-space: normal;
+    }
+    
+    .failed-chunks-actions {
+        width: 100%;
+        justify-content: center;
+    }
+}
+
 /* Settings Modal Styles */
 .api-key-container {
     display: flex;

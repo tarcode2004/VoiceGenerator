@@ -213,6 +213,146 @@ class RateLimiter {
 // Global rate limiter instance
 const chatGPTRateLimiter = new RateLimiter(CONFIG.PARALLEL_PROCESSING.MAX_CONCURRENT_CHATGPT, 60000);
 
+// Audio Generation Retry Strategy
+class AudioRetryManager {
+    constructor() {
+        this.maxRetries = 3;
+        this.baseDelay = 1000; // 1 second
+        this.maxDelay = 30000; // 30 seconds
+        this.backoffMultiplier = 2;
+        this.failedChunks = new Map(); // Track failed chunks for manual retry
+        this.retryQueue = []; // Queue for manual retries
+    }
+
+    // Exponential backoff delay calculation
+    calculateDelay(attempt) {
+        const delay = this.baseDelay * Math.pow(this.backoffMultiplier, attempt);
+        return Math.min(delay, this.maxDelay);
+    }
+
+    // Retry individual TTS request with exponential backoff
+    async retryTTSRequest(text, voice, language, attempt = 0) {
+        try {
+            return await generateTTSAudio(text, voice, language);
+        } catch (error) {
+            if (attempt >= this.maxRetries) {
+                debugLog(`TTS request failed after ${this.maxRetries} attempts:`, error);
+                throw error;
+            }
+
+            const delay = this.calculateDelay(attempt);
+            debugLog(`TTS request failed, retrying in ${delay}ms (attempt ${attempt + 1}/${this.maxRetries})`);
+            
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return this.retryTTSRequest(text, voice, language, attempt + 1);
+        }
+    }
+
+    // Retry entire chunk generation
+    async retryChunkGeneration(chunk, chunkIndex, maxChunkRetries = 2) {
+        for (let attempt = 0; attempt <= maxChunkRetries; attempt++) {
+            try {
+                debugLog(`Retrying chunk ${chunkIndex + 1}, attempt ${attempt + 1}/${maxChunkRetries + 1}`);
+                
+                const chunkList = {
+                    title: `${currentList.title} - Part ${chunkIndex + 1} (Retry ${attempt + 1})`,
+                    description: `Part ${chunkIndex + 1} of ${currentList.items.length} (${chunk.length} items) - Retry ${attempt + 1}`,
+                    items: chunk
+                };
+                
+                const audioBlob = await generateAudioForList(chunkList);
+                
+                if (audioBlob && audioBlob.size > 0) {
+                    debugLog(`Chunk ${chunkIndex + 1} retry successful on attempt ${attempt + 1}`);
+                    return audioBlob;
+                } else {
+                    throw new Error('Generated empty audio blob');
+                }
+            } catch (error) {
+                debugLog(`Chunk ${chunkIndex + 1} retry attempt ${attempt + 1} failed:`, error);
+                
+                if (attempt === maxChunkRetries) {
+                    // Add to failed chunks for manual retry
+                    this.failedChunks.set(chunkIndex, {
+                        chunk,
+                        error: error.message,
+                        attempts: maxChunkRetries + 1,
+                        timestamp: Date.now()
+                    });
+                    throw error;
+                }
+                
+                // Wait before next retry
+                const delay = this.calculateDelay(attempt);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+
+    // Add chunk to manual retry queue
+    addToRetryQueue(chunkIndex) {
+        const failedChunk = this.failedChunks.get(chunkIndex);
+        if (failedChunk && !this.retryQueue.includes(chunkIndex)) {
+            this.retryQueue.push(chunkIndex);
+            debugLog(`Added chunk ${chunkIndex + 1} to manual retry queue`);
+        }
+    }
+
+    // Get failed chunks for UI display
+    getFailedChunks() {
+        return Array.from(this.failedChunks.entries()).map(([index, data]) => ({
+            index,
+            ...data
+        }));
+    }
+
+    // Clear failed chunks
+    clearFailedChunks() {
+        this.failedChunks.clear();
+        this.retryQueue = [];
+    }
+
+    // Manual retry of specific failed chunks
+    async retryFailedChunks(chunkIndices) {
+        const results = [];
+        
+        for (const chunkIndex of chunkIndices) {
+            try {
+                const failedChunk = this.failedChunks.get(chunkIndex);
+                if (!failedChunk) {
+                    debugLog(`Chunk ${chunkIndex + 1} not found in failed chunks`);
+                    continue;
+                }
+
+                debugLog(`Manually retrying chunk ${chunkIndex + 1}`);
+                const audioBlob = await this.retryChunkGeneration(failedChunk.chunk, chunkIndex, 1);
+                
+                results.push({
+                    chunkIndex,
+                    success: true,
+                    audioBlob
+                });
+                
+                // Remove from failed chunks
+                this.failedChunks.delete(chunkIndex);
+                
+            } catch (error) {
+                debugLog(`Manual retry failed for chunk ${chunkIndex + 1}:`, error);
+                results.push({
+                    chunkIndex,
+                    success: false,
+                    error: error.message
+                });
+            }
+        }
+        
+        return results;
+    }
+}
+
+// Global retry manager instance
+const audioRetryManager = new AudioRetryManager();
+
 // State management
 let vocabLists = JSON.parse(localStorage.getItem('vocabLists') || '[]');
 let pastGenerations = JSON.parse(localStorage.getItem('pastGenerations') || '[]');
@@ -2055,6 +2195,9 @@ async function generateAudio() {
     generatedAudioFiles = [];
     activeGenerationPromises = [];
     
+    // Clear any previous failed chunks
+    audioRetryManager.clearFailedChunks();
+    
     elements.generateAudioBtn.disabled = true;
     elements.audioProgress.classList.remove('hidden');
     elements.audioResults.classList.add('hidden');
@@ -2116,6 +2259,7 @@ async function generateAudio() {
         } else {
             debugLog('Audio generation completed successfully');
             const completedFiles = generatedAudioFiles.filter(file => file.status === 'completed');
+            const failedFiles = generatedAudioFiles.filter(file => file.status === 'error');
             const combinedFile = generatedAudioFiles.find(file => file.isCombined && file.status === 'completed');
             
             if (completedFiles.length > 0) {
@@ -2126,8 +2270,16 @@ async function generateAudio() {
                 if (combinedFile) {
                     message += '\n\nA combined file with all parts has also been generated and is available for download.';
                 }
+                if (failedFiles.length > 0) {
+                    message += `\n\n${failedFiles.length} part${failedFiles.length > 1 ? 's' : ''} failed to generate. You can retry them using the options below.`;
+                }
                 message += '\n\nThis generation has been saved to your Past Generations for future access.';
                 alert(message);
+                
+                // Show failed chunks UI if there are failures
+                if (failedFiles.length > 0) {
+                    showFailedChunksUI();
+                }
             }
         }
         
@@ -2164,6 +2316,7 @@ async function generateAudioParallel(chunks, itemsPerChunk) {
             part: index + 1,
             totalParts: chunks.length,
             items: chunk.length,
+            title: currentList ? currentList.title : 'vocabulary_list',
             status: 'pending',
             progress: 0,
             audioBlob: null,
@@ -2192,7 +2345,14 @@ async function generateAudioParallel(chunks, itemsPerChunk) {
                 items: chunk
             };
             
-            const audioBlob = await generateAudioForList(chunkList);
+            let audioBlob;
+            try {
+                audioBlob = await generateAudioForList(chunkList);
+            } catch (initialError) {
+                debugLog(`Initial generation failed for chunk ${index + 1}, attempting retry:`, initialError);
+                // Try retry mechanism
+                audioBlob = await audioRetryManager.retryChunkGeneration(chunk, index);
+            }
             
             if (generationCancelled) {
                 fileEntry.status = 'cancelled';
@@ -2215,6 +2375,9 @@ async function generateAudioParallel(chunks, itemsPerChunk) {
             fileEntry.status = 'error';
             fileEntry.error = error.message;
             fileEntry.endTime = Date.now();
+            
+            // Add to retry queue for manual retry
+            audioRetryManager.addToRetryQueue(index);
         }
         
         // Update UI after each completion
@@ -2248,6 +2411,7 @@ async function generateAudioSequential(chunks, itemsPerChunk) {
             part: i + 1,
             totalParts: chunks.length,
             items: chunk.length,
+            title: currentList ? currentList.title : 'vocabulary_list',
             status: 'generating',
             progress: 0,
             audioBlob: null,
@@ -2275,7 +2439,14 @@ async function generateAudioSequential(chunks, itemsPerChunk) {
                 items: chunk
             };
             
-            const audioBlob = await generateAudioForList(chunkList);
+            let audioBlob;
+            try {
+                audioBlob = await generateAudioForList(chunkList);
+            } catch (initialError) {
+                debugLog(`Initial generation failed for chunk ${i + 1}, attempting retry:`, initialError);
+                // Try retry mechanism
+                audioBlob = await audioRetryManager.retryChunkGeneration(chunk, i);
+            }
             
             if (generationCancelled) {
                 fileEntry.status = 'cancelled';
@@ -2298,6 +2469,9 @@ async function generateAudioSequential(chunks, itemsPerChunk) {
             fileEntry.status = 'error';
             fileEntry.error = error.message;
             fileEntry.endTime = Date.now();
+            
+            // Add to retry queue for manual retry
+            audioRetryManager.addToRetryQueue(i);
         }
         
         updateAudioFilesUI();
@@ -2317,6 +2491,167 @@ async function generateAudioSequential(chunks, itemsPerChunk) {
     }
 }
 
+// UI functions for handling failed chunks and retries
+function showFailedChunksUI() {
+    const failedChunks = audioRetryManager.getFailedChunks();
+    
+    if (failedChunks.length === 0) {
+        return;
+    }
+    
+    // Create or update failed chunks section
+    let failedChunksSection = document.getElementById('failedChunksSection');
+    if (!failedChunksSection) {
+        failedChunksSection = document.createElement('div');
+        failedChunksSection.id = 'failedChunksSection';
+        failedChunksSection.className = 'failed-chunks-section';
+        failedChunksSection.innerHTML = `
+            <h3>Failed Audio Parts</h3>
+            <div class="failed-chunks-list"></div>
+            <div class="failed-chunks-actions">
+                <button id="retryAllFailedBtn" class="btn btn-warning">Retry All Failed</button>
+                <button id="retrySelectedBtn" class="btn btn-primary">Retry Selected</button>
+                <button id="clearFailedBtn" class="btn btn-secondary">Clear Failed</button>
+            </div>
+        `;
+        
+        // Insert after audio results
+        const audioResults = document.getElementById('audioResults');
+        audioResults.parentNode.insertBefore(failedChunksSection, audioResults.nextSibling);
+        
+        // Add event listeners
+        document.getElementById('retryAllFailedBtn').addEventListener('click', retryAllFailedChunks);
+        document.getElementById('retrySelectedBtn').addEventListener('click', retrySelectedFailedChunks);
+        document.getElementById('clearFailedBtn').addEventListener('click', clearFailedChunks);
+    }
+    
+    // Update failed chunks list
+    const failedChunksList = failedChunksSection.querySelector('.failed-chunks-list');
+    failedChunksList.innerHTML = '';
+    
+    failedChunks.forEach(failedChunk => {
+        const chunkElement = document.createElement('div');
+        chunkElement.className = 'failed-chunk-item';
+        chunkElement.innerHTML = `
+            <div class="failed-chunk-info">
+                <input type="checkbox" class="chunk-select" data-index="${failedChunk.index}" checked>
+                <span class="chunk-title">Part ${failedChunk.index + 1} (${failedChunk.chunk.length} items)</span>
+                <span class="chunk-error">${failedChunk.error}</span>
+                <span class="chunk-attempts">Attempts: ${failedChunk.attempts}</span>
+            </div>
+            <button class="btn btn-sm btn-primary retry-single-chunk" data-index="${failedChunk.index}">
+                Retry This Part
+            </button>
+        `;
+        
+        failedChunksList.appendChild(chunkElement);
+        
+        // Add event listener for single retry
+        chunkElement.querySelector('.retry-single-chunk').addEventListener('click', (e) => {
+            retrySingleFailedChunk(failedChunk.index);
+        });
+    });
+    
+    failedChunksSection.style.display = 'block';
+}
+
+async function retryAllFailedChunks() {
+    const failedChunks = audioRetryManager.getFailedChunks();
+    if (failedChunks.length === 0) return;
+    
+    const chunkIndices = failedChunks.map(chunk => chunk.index);
+    await retryFailedChunks(chunkIndices);
+}
+
+async function retrySelectedFailedChunks() {
+    const selectedCheckboxes = document.querySelectorAll('.chunk-select:checked');
+    if (selectedCheckboxes.length === 0) {
+        alert('Please select at least one failed part to retry.');
+        return;
+    }
+    
+    const chunkIndices = Array.from(selectedCheckboxes).map(cb => parseInt(cb.dataset.index));
+    await retryFailedChunks(chunkIndices);
+}
+
+async function retrySingleFailedChunk(chunkIndex) {
+    await retryFailedChunks([chunkIndex]);
+}
+
+async function retryFailedChunks(chunkIndices) {
+    if (chunkIndices.length === 0) return;
+    
+    debugLog(`Retrying ${chunkIndices.length} failed chunks:`, chunkIndices);
+    
+    // Disable retry buttons during retry
+    const retryButtons = document.querySelectorAll('#retryAllFailedBtn, #retrySelectedBtn, .retry-single-chunk');
+    retryButtons.forEach(btn => btn.disabled = true);
+    
+    try {
+        const results = await audioRetryManager.retryFailedChunks(chunkIndices);
+        
+        // Update UI for successful retries
+        results.forEach(result => {
+            if (result.success) {
+                // Update the corresponding file entry
+                const fileEntry = generatedAudioFiles.find(f => f.part === result.chunkIndex + 1);
+                if (fileEntry) {
+                    fileEntry.audioBlob = result.audioBlob;
+                    fileEntry.status = 'completed';
+                    fileEntry.error = null;
+                    fileEntry.endTime = Date.now();
+                    fileEntry.progress = 100;
+                }
+            }
+        });
+        
+        // Update UI
+        updateAudioFilesUI();
+        showFailedChunksUI();
+        updateFailedChunksVisibility();
+        
+        // Show results
+        const successful = results.filter(r => r.success).length;
+        const failed = results.filter(r => !r.success).length;
+        
+        if (successful > 0) {
+            alert(`Successfully retried ${successful} part(s).${failed > 0 ? ` ${failed} part(s) still failed.` : ''}`);
+        } else {
+            alert(`All ${failed} retry attempts failed. Please check your connection and try again.`);
+        }
+        
+    } catch (error) {
+        debugLog('Error during retry:', error);
+        alert('Error during retry: ' + error.message);
+    } finally {
+        // Re-enable retry buttons
+        retryButtons.forEach(btn => btn.disabled = false);
+    }
+}
+
+function clearFailedChunks() {
+    audioRetryManager.clearFailedChunks();
+    
+    const failedChunksSection = document.getElementById('failedChunksSection');
+    if (failedChunksSection) {
+        failedChunksSection.style.display = 'none';
+    }
+}
+
+// Update failed chunks UI visibility
+function updateFailedChunksVisibility() {
+    const failedChunks = audioRetryManager.getFailedChunks();
+    const failedChunksSection = document.getElementById('failedChunksSection');
+    
+    if (failedChunksSection) {
+        if (failedChunks.length === 0) {
+            failedChunksSection.style.display = 'none';
+        } else {
+            failedChunksSection.style.display = 'block';
+        }
+    }
+}
+
 // Generate combined audio file from all completed parts
 async function generateCombinedAudioFile(completedFiles) {
     debugLog('Starting combined audio file generation');
@@ -2328,6 +2663,7 @@ async function generateCombinedAudioFile(completedFiles) {
         part: 'Combined',
         totalParts: 'All',
         items: completedFiles.reduce((total, file) => total + file.items, 0),
+        title: currentList ? currentList.title : 'vocabulary_list',
         status: 'generating',
         progress: 0,
         audioBlob: null,
@@ -2687,10 +3023,14 @@ function downloadAudio(fileId) {
         const fileExtension = file.audioBlob.type.includes('wav') ? 'wav' : 'mp3';
         
         let fileName;
+        // Use the file's title if available, otherwise fall back to currentList or a default
+        const listTitle = file.title || (currentList ? currentList.title : 'vocabulary_list');
+        const safeTitle = listTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        
         if (file.isCombined) {
-            fileName = `${currentList.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_combined_all_parts.${fileExtension}`;
+            fileName = `${safeTitle}_combined_all_parts.${fileExtension}`;
         } else {
-            fileName = `${currentList.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_part${file.part}_of${file.totalParts}.${fileExtension}`;
+            fileName = `${safeTitle}_part${file.part}_of${file.totalParts}.${fileExtension}`;
         }
         
         a.download = fileName;
@@ -2698,6 +3038,11 @@ function downloadAudio(fileId) {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
+        
+        debugLog(`Downloaded audio file: ${fileName}`);
+    } else {
+        debugLog('Error: File not found or no audio blob available for download');
+        alert('Error: File not found or no audio blob available for download');
     }
 }
 
@@ -2728,7 +3073,7 @@ async function generateAudioForList(list) {
         debugLog('Text is within OpenAI limits, proceeding with generation');
         
         // Generate audio for the entire text at once
-        const audioBlob = await generateTTSAudio(fullText, dutchVoice, 'Dutch');
+        const audioBlob = await generateTTSAudioWithRetry(fullText, dutchVoice, 'Dutch');
         
         return audioBlob;
     } else {
@@ -2879,11 +3224,20 @@ async function generateTTSAudio(text, voice, language) {
         const audioBlob = await response.blob();
         debugLog('TTS audio blob generated, size:', audioBlob.size);
         
+        if (!audioBlob || audioBlob.size === 0) {
+            throw new Error('Received empty audio blob from API');
+        }
+        
         return audioBlob;
     } catch (error) {
         debugLog('Error in generateTTSAudio:', error);
         throw error;
     }
+}
+
+// Enhanced TTS audio generation with retry
+async function generateTTSAudioWithRetry(text, voice, language) {
+    return await audioRetryManager.retryTTSRequest(text, voice, language);
 }
 
 function getVoiceInstructions(language) {
@@ -2921,28 +3275,28 @@ async function generateMultiLanguageAudio(items, dutchVoice, turkishVoice, russi
         // Dutch word
         if (item.dutchWord && item.dutchWord.trim()) {
             debugLog(`Generating Dutch audio for: ${item.dutchWord}`);
-            const dutchAudio = await generateTTSAudio(item.dutchWord.trim(), dutchVoice, 'Dutch');
+            const dutchAudio = await generateTTSAudioWithRetry(item.dutchWord.trim(), dutchVoice, 'Dutch');
             itemSegments.push(dutchAudio);
         }
         
         // Turkish translation
         if (item.turkishTranslation && item.turkishTranslation.trim()) {
             debugLog(`Generating Turkish audio for: ${item.turkishTranslation}`);
-            const turkishAudio = await generateTTSAudio(item.turkishTranslation.trim(), turkishVoice, 'Turkish');
+            const turkishAudio = await generateTTSAudioWithRetry(item.turkishTranslation.trim(), turkishVoice, 'Turkish');
             itemSegments.push(turkishAudio);
         }
         
         // Russian translation (if enabled)
         if (includeRussian && item.russianTranslation && item.russianTranslation.trim()) {
             debugLog(`Generating Russian audio for: ${item.russianTranslation}`);
-            const russianAudio = await generateTTSAudio(item.russianTranslation.trim(), russianVoice, 'Russian');
+            const russianAudio = await generateTTSAudioWithRetry(item.russianTranslation.trim(), russianVoice, 'Russian');
             itemSegments.push(russianAudio);
         }
         
         // Dutch sentence
         if (item.dutchSentence && item.dutchSentence.trim()) {
             debugLog(`Generating Dutch sentence audio for: ${item.dutchSentence}`);
-            const sentenceAudio = await generateTTSAudio(item.dutchSentence.trim(), dutchVoice, 'Dutch');
+            const sentenceAudio = await generateTTSAudioWithRetry(item.dutchSentence.trim(), dutchVoice, 'Dutch');
             itemSegments.push(sentenceAudio);
         }
         
@@ -2957,7 +3311,7 @@ async function generateMultiLanguageAudio(items, dutchVoice, turkishVoice, russi
             }
             if (additionalText.trim()) {
                 debugLog(`Generating additional info audio: ${additionalText}`);
-                const additionalAudio = await generateTTSAudio(additionalText.trim(), dutchVoice, 'Dutch');
+                const additionalAudio = await generateTTSAudioWithRetry(additionalText.trim(), dutchVoice, 'Dutch');
                 itemSegments.push(additionalAudio);
             }
         }
