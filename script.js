@@ -1,23 +1,89 @@
 // Configuration
 const CONFIG = {
-    OPENAI_API_KEY: null, // Will be set by user input
+    OPENAI_API_KEY: null, // Will be loaded from localStorage
     OPENAI_API_URL: 'https://api.openai.com/v1',
     CHATGPT_MODEL: 'gpt-4o-mini',
-    TTS_MODEL: 'gpt-4o-mini-tts'
+    TTS_MODEL: 'gpt-4o-mini-tts',
+    // Parallel processing configuration
+    PARALLEL_PROCESSING: {
+        ENABLED: true,
+        MAX_CONCURRENT_OCR: 4, // Limit OCR to avoid overwhelming the browser
+        MAX_CONCURRENT_CHATGPT: 8, // Limit ChatGPT requests to avoid rate limits
+        MAX_CONCURRENT_WORKERS: 8, // Your logical processor count
+        CHUNK_SIZE: 3000, // Default chunk size for text processing
+        RETRY_DELAY: 1000, // Delay between retries in ms
+        RATE_LIMIT_DELAY: 2000 // Delay between API calls to respect rate limits
+    }
 };
 
-// Function to get API key from user
+// Function to get API key from localStorage or prompt user
 function getApiKey() {
     if (!CONFIG.OPENAI_API_KEY) {
-        const apiKey = prompt('Please enter your OpenAI API key:');
-        if (apiKey && apiKey.trim()) {
-            CONFIG.OPENAI_API_KEY = apiKey.trim();
+        // Try to load from localStorage first
+        const storedApiKey = localStorage.getItem('openai_api_key');
+        if (storedApiKey && storedApiKey.trim()) {
+            CONFIG.OPENAI_API_KEY = storedApiKey.trim();
+            debugLog('API key loaded from localStorage');
             return CONFIG.OPENAI_API_KEY;
         } else {
-            throw new Error('API key is required to use this application');
+            // If no stored key, prompt user and save it
+            const apiKey = prompt('Please enter your OpenAI API key:');
+            if (apiKey && apiKey.trim()) {
+                CONFIG.OPENAI_API_KEY = apiKey.trim();
+                localStorage.setItem('openai_api_key', CONFIG.OPENAI_API_KEY);
+                debugLog('API key saved to localStorage');
+                return CONFIG.OPENAI_API_KEY;
+            } else {
+                throw new Error('API key is required to use this application');
+            }
         }
     }
     return CONFIG.OPENAI_API_KEY;
+}
+
+// Function to save API key to localStorage
+function saveApiKey(apiKey) {
+    if (apiKey && apiKey.trim()) {
+        CONFIG.OPENAI_API_KEY = apiKey.trim();
+        localStorage.setItem('openai_api_key', CONFIG.OPENAI_API_KEY);
+        debugLog('API key saved to localStorage');
+        return true;
+    }
+    return false;
+}
+
+// Function to clear API key from localStorage
+function clearApiKey() {
+    CONFIG.OPENAI_API_KEY = null;
+    localStorage.removeItem('openai_api_key');
+    debugLog('API key cleared from localStorage');
+}
+
+// Function to validate API key
+async function validateApiKey(apiKey) {
+    if (!apiKey || !apiKey.trim()) {
+        return { valid: false, message: 'API key is required' };
+    }
+    
+    try {
+        const response = await fetch(`${CONFIG.OPENAI_API_URL}/models`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${apiKey.trim()}`
+            }
+        });
+        
+        if (response.ok) {
+            return { valid: true, message: 'API key is valid' };
+        } else if (response.status === 401) {
+            return { valid: false, message: 'Invalid API key' };
+        } else {
+            return { valid: false, message: `API error: ${response.status}` };
+        }
+    } catch (error) {
+        debugLog('API key validation error:', error);
+        return { valid: false, message: 'Network error during validation' };
+    }
 }
 
 // Debug mode
@@ -30,8 +96,126 @@ function debugLog(message, data = null) {
     }
 }
 
+// Debounce utility function
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
+
+// Parallel processing utilities
+class ParallelProcessor {
+    constructor(maxConcurrent = 4) {
+        this.maxConcurrent = maxConcurrent;
+        this.running = 0;
+        this.queue = [];
+        this.results = [];
+        this.errors = [];
+        this.completed = 0;
+        this.total = 0;
+    }
+
+    async process(items, processor, progressCallback = null) {
+        this.total = items.length;
+        this.completed = 0;
+        this.results = new Array(items.length);
+        this.errors = [];
+        
+        debugLog(`Starting parallel processing of ${items.length} items with max ${this.maxConcurrent} concurrent`);
+        
+        // Create promises for all items
+        const promises = items.map((item, index) => 
+            this.processItem(item, index, processor, progressCallback)
+        );
+        
+        // Wait for all to complete
+        await Promise.allSettled(promises);
+        
+        debugLog(`Parallel processing completed. Success: ${this.results.filter(r => r !== undefined).length}, Errors: ${this.errors.length}`);
+        
+        return {
+            results: this.results.filter(r => r !== undefined),
+            errors: this.errors,
+            completed: this.completed,
+            total: this.total
+        };
+    }
+
+    async processItem(item, index, processor, progressCallback) {
+        // Wait for a slot to become available
+        while (this.running >= this.maxConcurrent) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        
+        this.running++;
+        
+        try {
+            debugLog(`Processing item ${index + 1}/${this.total}`);
+            const result = await processor(item, index);
+            this.results[index] = result;
+            this.completed++;
+            
+            if (progressCallback) {
+                progressCallback(this.completed, this.total, index, result);
+            }
+            
+            return result;
+        } catch (error) {
+            debugLog(`Error processing item ${index + 1}:`, error);
+            this.errors.push({ index, error: error.message, item });
+            this.completed++;
+            
+            if (progressCallback) {
+                progressCallback(this.completed, this.total, index, null, error);
+            }
+            
+            throw error;
+        } finally {
+            this.running--;
+        }
+    }
+}
+
+// Rate limiter for API calls
+class RateLimiter {
+    constructor(maxRequests = 8, timeWindow = 60000) { // 8 requests per minute
+        this.maxRequests = maxRequests;
+        this.timeWindow = timeWindow;
+        this.requests = [];
+    }
+
+    async waitForSlot() {
+        const now = Date.now();
+        
+        // Remove old requests outside the time window
+        this.requests = this.requests.filter(time => now - time < this.timeWindow);
+        
+        // If we're at the limit, wait
+        if (this.requests.length >= this.maxRequests) {
+            const oldestRequest = this.requests[0];
+            const waitTime = this.timeWindow - (now - oldestRequest);
+            debugLog(`Rate limit reached, waiting ${waitTime}ms`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            return this.waitForSlot(); // Recursive call after waiting
+        }
+        
+        // Add current request
+        this.requests.push(now);
+    }
+}
+
+// Global rate limiter instance
+const chatGPTRateLimiter = new RateLimiter(CONFIG.PARALLEL_PROCESSING.MAX_CONCURRENT_CHATGPT, 60000);
+
 // State management
 let vocabLists = JSON.parse(localStorage.getItem('vocabLists') || '[]');
+let pastGenerations = JSON.parse(localStorage.getItem('pastGenerations') || '[]');
 let currentList = null;
 let currentVocabItem = null;
 let selectedFile = null;
@@ -111,67 +295,272 @@ const elements = {
     manualText: document.getElementById('manualText'),
     processManualTextBtn: document.getElementById('processManualTextBtn'),
     cancelManualBtn: document.getElementById('cancelManualBtn'),
-    closeManualModal: document.getElementById('closeManualModal')
+    closeManualModal: document.getElementById('closeManualModal'),
+    
+    // Parallel processing elements
+    enableParallelProcessing: document.getElementById('enableParallelProcessing'),
+    maxConcurrentOCR: document.getElementById('maxConcurrentOCR'),
+    maxConcurrentChatGPT: document.getElementById('maxConcurrentChatGPT'),
+    chunkSize: document.getElementById('chunkSize'),
+    
+    // Past generations elements
+    refreshPastGenerationsBtn: document.getElementById('refreshPastGenerationsBtn'),
+    clearPastGenerationsBtn: document.getElementById('clearPastGenerationsBtn'),
+    pastGenerationsList: document.getElementById('pastGenerationsList'),
+    
+    // Settings modal elements
+    settingsBtn: document.getElementById('settingsBtn'),
+    settingsModal: document.getElementById('settingsModal'),
+    apiKeyInput: document.getElementById('apiKeyInput'),
+    toggleApiKeyVisibility: document.getElementById('toggleApiKeyVisibility'),
+    apiKeyStatus: document.getElementById('apiKeyStatus'),
+    apiKeyStatusIndicator: document.getElementById('apiKeyStatusIndicator'),
+    apiKeyStatusText: document.getElementById('apiKeyStatusText'),
+    saveSettingsBtn: document.getElementById('saveSettingsBtn'),
+    cancelSettingsBtn: document.getElementById('cancelSettingsBtn'),
+    closeSettingsModal: document.getElementById('closeSettingsModal')
 };
 
 // Initialize the application
 function init() {
     debugLog('Application initializing...');
+    
+    // Load API key from localStorage on startup
+    const storedApiKey = localStorage.getItem('openai_api_key');
+    if (storedApiKey && storedApiKey.trim()) {
+        CONFIG.OPENAI_API_KEY = storedApiKey.trim();
+        debugLog('API key loaded from localStorage on startup');
+    }
+    
+    // Debug: Check if settings elements exist
+    debugLog('Checking settings elements:');
+    debugLog('settingsBtn:', elements.settingsBtn);
+    debugLog('settingsModal:', elements.settingsModal);
+    debugLog('apiKeyInput:', elements.apiKeyInput);
+    
     renderVocabLists();
+    renderPastGenerations();
     setupEventListeners();
+    initParallelProcessingConfig();
     updateUI();
     debugLog('Application initialization complete');
 }
 
 // Event listeners setup
 function setupEventListeners() {
+    try {
+        debugLog('Setting up event listeners...');
     // List management
-    elements.createListBtn.addEventListener('click', openCreateListModal);
-    elements.saveListBtn.addEventListener('click', saveList);
-    elements.cancelListBtn.addEventListener('click', closeListModal);
-    elements.closeListModal.addEventListener('click', closeListModal);
-    elements.addVocabItemBtn.addEventListener('click', addVocabItem);
+    if (elements.createListBtn) {
+        elements.createListBtn.addEventListener('click', openCreateListModal);
+    }
+    if (elements.saveListBtn) {
+        elements.saveListBtn.addEventListener('click', saveList);
+    }
+    if (elements.cancelListBtn) {
+        elements.cancelListBtn.addEventListener('click', closeListModal);
+    }
+    if (elements.closeListModal) {
+        elements.closeListModal.addEventListener('click', closeListModal);
+    }
+    if (elements.addVocabItemBtn) {
+        elements.addVocabItemBtn.addEventListener('click', addVocabItem);
+    }
     
     // Vocab item management
-    elements.saveVocabItemBtn.addEventListener('click', saveVocabItem);
-    elements.cancelVocabItemBtn.addEventListener('click', closeVocabItemModal);
-    elements.closeVocabModal.addEventListener('click', closeVocabItemModal);
+    if (elements.saveVocabItemBtn) {
+        elements.saveVocabItemBtn.addEventListener('click', saveVocabItem);
+    }
+    if (elements.cancelVocabItemBtn) {
+        elements.cancelVocabItemBtn.addEventListener('click', closeVocabItemModal);
+    }
+    if (elements.closeVocabModal) {
+        elements.closeVocabModal.addEventListener('click', closeVocabItemModal);
+    }
     
     // PDF upload
-    elements.uploadArea.addEventListener('click', () => elements.pdfInput.click());
-    elements.uploadArea.addEventListener('dragover', handleDragOver);
-    elements.uploadArea.addEventListener('drop', handleFileDrop);
-    elements.pdfInput.addEventListener('change', handleFileSelect);
-    elements.extractBtn.addEventListener('click', extractFromPDF);
-    elements.manualInputBtn.addEventListener('click', openManualInputModal);
+    if (elements.uploadArea) {
+        elements.uploadArea.addEventListener('click', () => {
+            if (elements.pdfInput) elements.pdfInput.click();
+        });
+        elements.uploadArea.addEventListener('dragover', handleDragOver);
+        elements.uploadArea.addEventListener('drop', handleFileDrop);
+    }
+    if (elements.pdfInput) {
+        elements.pdfInput.addEventListener('change', handleFileSelect);
+    }
+    if (elements.extractBtn) {
+        elements.extractBtn.addEventListener('click', extractFromPDF);
+    }
+    if (elements.manualInputBtn) {
+        elements.manualInputBtn.addEventListener('click', openManualInputModal);
+    }
     
     // Audio generation
-    elements.generateAudioBtn.addEventListener('click', generateAudio);
-    elements.cancelGenerationBtn.addEventListener('click', cancelAudioGeneration);
+    if (elements.generateAudioBtn) {
+        elements.generateAudioBtn.addEventListener('click', generateAudio);
+    }
+    if (elements.cancelGenerationBtn) {
+        elements.cancelGenerationBtn.addEventListener('click', cancelAudioGeneration);
+    }
     
     // Debug functionality
     if (DEBUG) {
-        elements.debugToggle.addEventListener('click', toggleDebugPanel);
-        elements.refreshDebugBtn.addEventListener('click', updateDebugInfo);
-        elements.clearStorageBtn.addEventListener('click', clearLocalStorage);
+        if (elements.debugToggle) {
+            elements.debugToggle.addEventListener('click', toggleDebugPanel);
+            debugLog('Debug toggle event listener added');
+        } else {
+            debugLog('WARNING: debugToggle element not found');
+        }
+        
+        if (elements.refreshDebugBtn) {
+            elements.refreshDebugBtn.addEventListener('click', updateDebugInfo);
+            debugLog('Refresh debug button event listener added');
+        } else {
+            debugLog('WARNING: refreshDebugBtn element not found');
+        }
+        
+        if (elements.clearStorageBtn) {
+            elements.clearStorageBtn.addEventListener('click', clearLocalStorage);
+            debugLog('Clear storage button event listener added');
+        } else {
+            debugLog('WARNING: clearStorageBtn element not found');
+        }
+        
         updateDebugInfo(); // Initial debug info
     }
     
     // Modal backdrop clicks
-    elements.listModal.addEventListener('click', (e) => {
-        if (e.target === elements.listModal) closeListModal();
-    });
-    elements.vocabItemModal.addEventListener('click', (e) => {
-        if (e.target === elements.vocabItemModal) closeVocabItemModal();
-    });
-    elements.manualInputModal.addEventListener('click', (e) => {
-        if (e.target === elements.manualInputModal) closeManualInputModal();
-    });
+    if (elements.listModal) {
+        elements.listModal.addEventListener('click', (e) => {
+            if (e.target === elements.listModal) closeListModal();
+        });
+    }
+    if (elements.vocabItemModal) {
+        elements.vocabItemModal.addEventListener('click', (e) => {
+            if (e.target === elements.vocabItemModal) closeVocabItemModal();
+        });
+    }
+    if (elements.manualInputModal) {
+        elements.manualInputModal.addEventListener('click', (e) => {
+            if (e.target === elements.manualInputModal) closeManualInputModal();
+        });
+    }
     
     // Manual input functionality
-    elements.processManualTextBtn.addEventListener('click', processManualText);
-    elements.cancelManualBtn.addEventListener('click', closeManualInputModal);
-    elements.closeManualModal.addEventListener('click', closeManualInputModal);
+    if (elements.processManualTextBtn) {
+        elements.processManualTextBtn.addEventListener('click', processManualText);
+    }
+    if (elements.cancelManualBtn) {
+        elements.cancelManualBtn.addEventListener('click', closeManualInputModal);
+    }
+    if (elements.closeManualModal) {
+        elements.closeManualModal.addEventListener('click', closeManualInputModal);
+    }
+    
+    // Past generations functionality
+    if (elements.refreshPastGenerationsBtn) {
+        elements.refreshPastGenerationsBtn.addEventListener('click', refreshPastGenerations);
+    }
+    if (elements.clearPastGenerationsBtn) {
+        elements.clearPastGenerationsBtn.addEventListener('click', clearPastGenerations);
+    }
+    
+    // Parallel processing controls
+    if (elements.enableParallelProcessing) {
+        elements.enableParallelProcessing.addEventListener('change', updateParallelProcessingConfig);
+    }
+    if (elements.maxConcurrentOCR) {
+        elements.maxConcurrentOCR.addEventListener('change', updateParallelProcessingConfig);
+    }
+    if (elements.maxConcurrentChatGPT) {
+        elements.maxConcurrentChatGPT.addEventListener('change', updateParallelProcessingConfig);
+    }
+    if (elements.chunkSize) {
+        elements.chunkSize.addEventListener('change', updateParallelProcessingConfig);
+    }
+    
+    // Settings functionality
+    debugLog('Setting up settings event listeners...');
+    if (elements.settingsBtn) {
+        elements.settingsBtn.addEventListener('click', openSettingsModal);
+        debugLog('Settings button event listener added');
+    } else {
+        debugLog('ERROR: settingsBtn element not found!');
+    }
+    
+    if (elements.saveSettingsBtn) {
+        elements.saveSettingsBtn.addEventListener('click', saveSettings);
+        debugLog('Save settings button event listener added');
+    } else {
+        debugLog('ERROR: saveSettingsBtn element not found!');
+    }
+    
+    if (elements.cancelSettingsBtn) {
+        elements.cancelSettingsBtn.addEventListener('click', closeSettingsModal);
+        debugLog('Cancel settings button event listener added');
+    } else {
+        debugLog('ERROR: cancelSettingsBtn element not found!');
+    }
+    
+    if (elements.closeSettingsModal) {
+        elements.closeSettingsModal.addEventListener('click', closeSettingsModal);
+        debugLog('Close settings modal event listener added');
+    } else {
+        debugLog('ERROR: closeSettingsModal element not found!');
+    }
+    
+    if (elements.toggleApiKeyVisibility) {
+        elements.toggleApiKeyVisibility.addEventListener('click', toggleApiKeyVisibility);
+        debugLog('Toggle API key visibility event listener added');
+    } else {
+        debugLog('ERROR: toggleApiKeyVisibility element not found!');
+    }
+    
+    // Settings modal backdrop click
+    if (elements.settingsModal) {
+        elements.settingsModal.addEventListener('click', (e) => {
+            if (e.target === elements.settingsModal) closeSettingsModal();
+        });
+    }
+    
+    // API key input change event
+    if (elements.apiKeyInput) {
+        elements.apiKeyInput.addEventListener('input', debounce(checkApiKeyStatus, 1000));
+    }
+    
+    debugLog('Event listeners setup completed');
+    } catch (error) {
+        console.error('Error setting up event listeners:', error);
+        debugLog('Error setting up event listeners:', error);
+    }
+}
+
+// Missing functions for past generations
+function renderPastGenerations() {
+    debugLog('renderPastGenerations called');
+    // This function will be implemented later
+}
+
+function refreshPastGenerations() {
+    debugLog('refreshPastGenerations called');
+    // This function will be implemented later
+}
+
+function clearPastGenerations() {
+    debugLog('clearPastGenerations called');
+    if (confirm('Are you sure you want to clear all past generations? This cannot be undone.')) {
+        pastGenerations = [];
+        localStorage.removeItem('pastGenerations');
+        renderPastGenerations();
+        debugLog('Past generations cleared');
+        alert('All past generations have been cleared.');
+    }
+}
+
+function saveGenerationToHistory(completedFiles, combinedFile) {
+    debugLog('saveGenerationToHistory called');
+    // This function will be implemented later
 }
 
 // Vocabulary list management
@@ -309,6 +698,144 @@ function openManualInputModal() {
 
 function closeManualInputModal() {
     elements.manualInputModal.classList.add('hidden');
+}
+
+// Settings modal functions
+function openSettingsModal() {
+    debugLog('openSettingsModal called');
+    
+    if (!elements.settingsModal) {
+        debugLog('ERROR: settingsModal element not found!');
+        alert('Settings modal not found. Please refresh the page.');
+        return;
+    }
+    
+    // Load current API key from localStorage
+    const storedApiKey = localStorage.getItem('openai_api_key') || '';
+    if (elements.apiKeyInput) {
+        elements.apiKeyInput.value = storedApiKey;
+        debugLog('API key loaded into input field');
+    } else {
+        debugLog('ERROR: apiKeyInput element not found!');
+    }
+    
+    // Update API key visibility
+    updateApiKeyVisibility();
+    
+    // Check API key status
+    checkApiKeyStatus();
+    
+    elements.settingsModal.classList.remove('hidden');
+    debugLog('Settings modal should now be visible');
+}
+
+function closeSettingsModal() {
+    elements.settingsModal.classList.add('hidden');
+    // Reset the input to the stored value
+    const storedApiKey = localStorage.getItem('openai_api_key') || '';
+    elements.apiKeyInput.value = storedApiKey;
+    updateApiKeyVisibility();
+}
+
+function toggleApiKeyVisibility() {
+    const input = elements.apiKeyInput;
+    const button = elements.toggleApiKeyVisibility;
+    const icon = button.querySelector('i');
+    
+    if (input.type === 'password') {
+        input.type = 'text';
+        icon.className = 'fas fa-eye-slash';
+        button.title = 'Hide API Key';
+    } else {
+        input.type = 'password';
+        icon.className = 'fas fa-eye';
+        button.title = 'Show API Key';
+    }
+}
+
+function updateApiKeyVisibility() {
+    const input = elements.apiKeyInput;
+    const button = elements.toggleApiKeyVisibility;
+    const icon = button.querySelector('i');
+    
+    // Reset to password type
+    input.type = 'password';
+    icon.className = 'fas fa-eye';
+    button.title = 'Show API Key';
+}
+
+async function checkApiKeyStatus() {
+    const apiKey = elements.apiKeyInput.value.trim();
+    const indicator = elements.apiKeyStatusIndicator;
+    const statusText = elements.apiKeyStatusText;
+    
+    if (!apiKey) {
+        indicator.className = 'status-indicator missing';
+        statusText.textContent = 'No API key provided';
+        return;
+    }
+    
+    // Show checking status
+    indicator.className = 'status-indicator checking';
+    statusText.textContent = 'Checking API key...';
+    
+    try {
+        const validation = await validateApiKey(apiKey);
+        
+        if (validation.valid) {
+            indicator.className = 'status-indicator valid';
+            statusText.textContent = validation.message;
+        } else {
+            indicator.className = 'status-indicator invalid';
+            statusText.textContent = validation.message;
+        }
+    } catch (error) {
+        debugLog('Error checking API key status:', error);
+        indicator.className = 'status-indicator invalid';
+        statusText.textContent = 'Error checking API key';
+    }
+}
+
+async function saveSettings() {
+    const apiKey = elements.apiKeyInput.value.trim();
+    
+    if (!apiKey) {
+        alert('Please enter an API key');
+        return;
+    }
+    
+    // Validate the API key before saving
+    elements.saveSettingsBtn.disabled = true;
+    elements.saveSettingsBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Validating...';
+    
+    try {
+        const validation = await validateApiKey(apiKey);
+        
+        if (validation.valid) {
+            // Save the API key
+            saveApiKey(apiKey);
+            
+            // Update the status
+            elements.apiKeyStatusIndicator.className = 'status-indicator valid';
+            elements.apiKeyStatusText.textContent = 'API key saved successfully';
+            
+            // Close the modal after a short delay
+            setTimeout(() => {
+                closeSettingsModal();
+                alert('Settings saved successfully!');
+            }, 1000);
+        } else {
+            alert(`Invalid API key: ${validation.message}`);
+            elements.apiKeyStatusIndicator.className = 'status-indicator invalid';
+            elements.apiKeyStatusText.textContent = validation.message;
+        }
+    } catch (error) {
+        debugLog('Error saving settings:', error);
+        alert('Error saving settings. Please try again.');
+    } finally {
+        elements.saveSettingsBtn.disabled = false;
+        elements.saveSettingsBtn.innerHTML = 'Save Settings';
+    }
 }
 
 async function processManualText() {
@@ -575,10 +1102,14 @@ async function extractFromPDF() {
     
     try {
         debugLog('Starting PDF extraction process');
+        debugLog('Parallel processing enabled:', CONFIG.PARALLEL_PROCESSING.ENABLED);
         
         // Update progress for text extraction
         progressFill.style.width = '10%';
-        progressText.textContent = useOCR ? 'Extracting text with OCR...' : 'Extracting text from PDF...';
+        const processingMode = useOCR ? 
+            (CONFIG.PARALLEL_PROCESSING.ENABLED ? 'Parallel OCR' : 'Sequential OCR') : 
+            'PDF.js extraction';
+        progressText.textContent = `Extracting text with ${processingMode}...`;
         
         const text = await extractTextFromPDF(selectedFile);
         debugLog('Text extracted from PDF, length:', text.length);
@@ -586,7 +1117,8 @@ async function extractFromPDF() {
         
         // Update progress for vocabulary extraction
         progressFill.style.width = '30%';
-        progressText.textContent = 'Extracting vocabulary with AI...';
+        const vocabProcessingMode = CONFIG.PARALLEL_PROCESSING.ENABLED ? 'Parallel AI' : 'Sequential AI';
+        progressText.textContent = `Extracting vocabulary with ${vocabProcessingMode}...`;
         
         let vocabData;
         try {
@@ -740,66 +1272,15 @@ async function extractTextWithOCR(file) {
             const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
             debugLog('PDF loaded for OCR, pages:', pdf.numPages);
             
-            let extractedText = '';
-            
-            // Process each page with OCR
-            for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-                debugLog(`Processing page ${pageNum} with OCR`);
-                
-                // Get the page
-                const page = await pdf.getPage(pageNum);
-                const viewport = page.getViewport({ scale: 2.0 }); // Higher scale for better OCR
-                
-                // Create canvas for rendering
-                const canvas = document.createElement('canvas');
-                const context = canvas.getContext('2d');
-                canvas.height = viewport.height;
-                canvas.width = viewport.width;
-                
-                // Render page to canvas
-                const renderContext = {
-                    canvasContext: context,
-                    viewport: viewport
-                };
-                
-                await page.render(renderContext).promise;
-                
-                // Use Tesseract OCR on the canvas
-                const result = await Tesseract.recognize(
-                    canvas,
-                    'nld+eng', // Dutch and English languages
-                    {
-                        logger: m => {
-                            if (m.status === 'recognizing text') {
-                                const progress = Math.round(m.progress * 100);
-                                debugLog(`OCR progress: ${progress}%`);
-                                
-                                // Update progress bar
-                                const progressFill = elements.ocrProgress.querySelector('.progress-fill');
-                                const progressText = elements.ocrProgress.querySelector('.progress-text');
-                                const pageProgress = ((pageNum - 1) / pdf.numPages) * 100;
-                                const totalProgress = pageProgress + (m.progress * (100 / pdf.numPages));
-                                progressFill.style.width = `${totalProgress}%`;
-                                progressText.textContent = `Processing page ${pageNum} with OCR... ${progress}%`;
-                            }
-                        }
-                    }
-                );
-                
-                const pageText = result.data.text;
-                extractedText += pageText + '\n';
-                
-                debugLog(`Page ${pageNum} OCR text length:`, pageText.length);
-                debugLog(`Page ${pageNum} OCR text sample:`, pageText.substring(0, 200));
-                
-                // Clean up canvas
-                canvas.remove();
+            if (CONFIG.PARALLEL_PROCESSING.ENABLED && pdf.numPages > 1) {
+                debugLog('Using parallel OCR processing');
+                const extractedText = await extractTextWithParallelOCR(pdf);
+                resolve(extractedText);
+            } else {
+                debugLog('Using sequential OCR processing');
+                const extractedText = await extractTextWithSequentialOCR(pdf);
+                resolve(extractedText);
             }
-            
-            debugLog('Total OCR extracted text length:', extractedText.length);
-            debugLog('OCR extracted text preview:', extractedText.substring(0, 500));
-            
-            resolve(extractedText);
         } catch (error) {
             debugLog('Error in OCR text extraction:', error);
             reject(new Error(`OCR extraction failed: ${error.message}`));
@@ -807,12 +1288,119 @@ async function extractTextWithOCR(file) {
     });
 }
 
+// Sequential OCR processing (original method)
+async function extractTextWithSequentialOCR(pdf) {
+    let extractedText = '';
+    
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        debugLog(`Processing page ${pageNum} with OCR (sequential)`);
+        
+        const pageText = await processPageWithOCR(pdf, pageNum, pageNum, pdf.numPages);
+        extractedText += pageText + '\n';
+    }
+    
+    debugLog('Sequential OCR completed, total text length:', extractedText.length);
+    return extractedText;
+}
+
+// Parallel OCR processing
+async function extractTextWithParallelOCR(pdf) {
+    debugLog(`Starting parallel OCR processing for ${pdf.numPages} pages`);
+    
+    // Create page objects for parallel processing
+    const pages = Array.from({ length: pdf.numPages }, (_, i) => i + 1);
+    
+    // Create parallel processor for OCR
+    const ocrProcessor = new ParallelProcessor(CONFIG.PARALLEL_PROCESSING.MAX_CONCURRENT_OCR);
+    
+    // Progress callback for OCR
+    const progressCallback = (completed, total, index, result, error) => {
+        const progressFill = elements.ocrProgress.querySelector('.progress-fill');
+        const progressText = elements.ocrProgress.querySelector('.progress-text');
+        
+        if (progressFill && progressText) {
+            const progress = (completed / total) * 100;
+            progressFill.style.width = `${progress}%`;
+            
+            if (error) {
+                progressText.textContent = `OCR error on page ${index + 1}: ${error.message}`;
+            } else {
+                progressText.textContent = `Processing page ${index + 1}/${total} with OCR... (${completed}/${total} completed)`;
+            }
+        }
+    };
+    
+    // Process pages in parallel
+    const results = await ocrProcessor.process(pages, async (pageNum, index) => {
+        return await processPageWithOCR(pdf, pageNum, index + 1, pages.length);
+    }, progressCallback);
+    
+    // Combine results
+    const extractedText = results.results.join('\n');
+    
+    debugLog(`Parallel OCR completed. Success: ${results.results.length}, Errors: ${results.errors.length}`);
+    debugLog('Total extracted text length:', extractedText.length);
+    
+    if (results.errors.length > 0) {
+        debugLog('OCR errors encountered:', results.errors);
+    }
+    
+    return extractedText;
+}
+
+// Process a single page with OCR
+async function processPageWithOCR(pdf, pageNum, currentIndex, totalPages) {
+    debugLog(`Processing page ${pageNum} with OCR (${currentIndex}/${totalPages})`);
+    
+    // Get the page
+    const page = await pdf.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 2.0 }); // Higher scale for better OCR
+    
+    // Create canvas for rendering
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    canvas.height = viewport.height;
+    canvas.width = viewport.width;
+    
+    // Render page to canvas
+    const renderContext = {
+        canvasContext: context,
+        viewport: viewport
+    };
+    
+    await page.render(renderContext).promise;
+    
+    // Use Tesseract OCR on the canvas
+    const result = await Tesseract.recognize(
+        canvas,
+        'nld+eng', // Dutch and English languages
+        {
+            logger: m => {
+                if (m.status === 'recognizing text') {
+                    const progress = Math.round(m.progress * 100);
+                    debugLog(`OCR progress for page ${pageNum}: ${progress}%`);
+                }
+            }
+        }
+    );
+    
+    const pageText = result.data.text;
+    
+    debugLog(`Page ${pageNum} OCR text length:`, pageText.length);
+    debugLog(`Page ${pageNum} OCR text sample:`, pageText.substring(0, 200));
+    
+    // Clean up canvas
+    canvas.remove();
+    
+    return pageText;
+}
+
 // Fallback vocabulary extraction for large texts
 async function extractVocabWithFallback(text) {
     debugLog('Using fallback extraction method for large text');
     
     // Split text into smaller chunks
-    const chunkSize = 3000;
+    const chunkSize = CONFIG.PARALLEL_PROCESSING.CHUNK_SIZE;
     const chunks = [];
     
     for (let i = 0; i < text.length; i += chunkSize) {
@@ -821,6 +1409,17 @@ async function extractVocabWithFallback(text) {
     
     debugLog(`Split text into ${chunks.length} chunks`);
     
+    if (CONFIG.PARALLEL_PROCESSING.ENABLED && chunks.length > 1) {
+        debugLog('Using parallel fallback extraction');
+        return await extractVocabWithParallelFallback(chunks);
+    } else {
+        debugLog('Using sequential fallback extraction');
+        return await extractVocabWithSequentialFallback(chunks);
+    }
+}
+
+// Sequential fallback extraction (original method)
+async function extractVocabWithSequentialFallback(chunks) {
     const allItems = [];
     let processedChunks = 0;
     
@@ -849,10 +1448,69 @@ async function extractVocabWithFallback(text) {
         
         // Small delay between chunks to avoid rate limiting
         if (i < chunks.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            await new Promise(resolve => setTimeout(resolve, CONFIG.PARALLEL_PROCESSING.RATE_LIMIT_DELAY));
         }
     }
     
+    return processExtractionResults(allItems, processedChunks, chunks.length, 'sequential');
+}
+
+// Parallel fallback extraction
+async function extractVocabWithParallelFallback(chunks) {
+    debugLog(`Starting parallel fallback extraction for ${chunks.length} chunks`);
+    
+    // Show progress in the PDF upload panel
+    elements.ocrProgress.classList.remove('hidden');
+    
+    // Create parallel processor for ChatGPT requests
+    const chatGPTProcessor = new ParallelProcessor(CONFIG.PARALLEL_PROCESSING.MAX_CONCURRENT_CHATGPT);
+    
+    // Progress callback for parallel processing
+    const progressCallback = (completed, total, index, result, error) => {
+        const progressFill = elements.ocrProgress.querySelector('.progress-fill');
+        const progressText = elements.ocrProgress.querySelector('.progress-text');
+        
+        if (progressFill && progressText) {
+            const progress = (completed / total) * 100;
+            progressFill.style.width = `${progress}%`;
+            
+            if (error) {
+                progressText.textContent = `Error processing chunk ${index + 1}: ${error.message}`;
+            } else {
+                progressText.textContent = `Processing chunk ${index + 1}/${total} with AI... (${completed}/${total} completed)`;
+            }
+        }
+    };
+    
+    // Process chunks in parallel with rate limiting
+    const results = await chatGPTProcessor.process(chunks, async (chunk, index) => {
+        // Wait for rate limiter before making API call
+        await chatGPTRateLimiter.waitForSlot();
+        
+        debugLog(`Processing chunk ${index + 1}/${chunks.length} with parallel processing`);
+        return await processChunkWithRetry(chunk, index + 1, chunks.length);
+    }, progressCallback);
+    
+    // Combine all results
+    const allItems = [];
+    let processedChunks = 0;
+    
+    for (let i = 0; i < results.results.length; i++) {
+        const result = results.results[i];
+        if (result && result.items) {
+            allItems.push(...result.items);
+            processedChunks++;
+            debugLog(`Chunk ${i + 1} extracted ${result.items.length} items`);
+        }
+    }
+    
+    debugLog(`Parallel fallback extraction completed. Success: ${results.results.length}, Errors: ${results.errors.length}`);
+    
+    return processExtractionResults(allItems, processedChunks, chunks.length, 'parallel');
+}
+
+// Process extraction results (common for both sequential and parallel)
+function processExtractionResults(allItems, processedChunks, totalChunks, method) {
     // Remove duplicates based on dutchWord
     const uniqueItems = [];
     const seenWords = new Set();
@@ -864,14 +1522,14 @@ async function extractVocabWithFallback(text) {
         }
     }
     
-    debugLog(`Fallback extraction completed. Total items: ${allItems.length}, Unique items: ${uniqueItems.length}, Processed chunks: ${processedChunks}/${chunks.length}`);
+    debugLog(`${method.charAt(0).toUpperCase() + method.slice(1)} extraction completed. Total items: ${allItems.length}, Unique items: ${uniqueItems.length}, Processed chunks: ${processedChunks}/${totalChunks}`);
     
     // Hide progress when done
     elements.ocrProgress.classList.add('hidden');
     
     return {
-        title: 'Extracted Vocabulary List (Fallback)',
-        description: `Vocabulary extracted from PDF using fallback method (${processedChunks}/${chunks.length} chunks processed)`,
+        title: `Extracted Vocabulary List (${method.charAt(0).toUpperCase() + method.slice(1)} Fallback)`,
+        description: `Vocabulary extracted from PDF using ${method} fallback method (${processedChunks}/${totalChunks} chunks processed)`,
         items: uniqueItems
     };
 }
@@ -1048,6 +1706,9 @@ async function extractVocabWithChatGPT(text) {
     // Update progress to show AI processing
     const progressText = elements.ocrProgress.querySelector('.progress-text');
     progressText.textContent = 'Processing with AI...';
+    
+    // Wait for rate limiter before making API call
+    await chatGPTRateLimiter.waitForSlot();
     
     const prompt = `
 You are extracting Dutch vocabulary from a PDF that contains a structured vocabulary list. The PDF has three columns:
@@ -1253,7 +1914,8 @@ async function generateAudio() {
             `• Audio language mode: ${languageModeDescription}\n` +
             `• Estimated total time: ~${estimatedTotalTime} minutes\n` +
             `• Each file: ~${itemsPerChunk} items (~${estimatedFileSizeMB}MB)\n` +
-            `• Files will be available for download as they complete`;
+            `• Files will be available for download as they complete\n` +
+            `• Combined file will be generated at the end`;
         
         if (!confirm(summaryMessage + '\n\nContinue with audio generation?')) {
             debugLog('User cancelled audio generation');
@@ -1275,8 +1937,18 @@ async function generateAudio() {
         } else {
             debugLog('Audio generation completed successfully');
             const completedFiles = generatedAudioFiles.filter(file => file.status === 'completed');
+            const combinedFile = generatedAudioFiles.find(file => file.isCombined && file.status === 'completed');
+            
             if (completedFiles.length > 0) {
-                alert(`Audio generation completed! ${completedFiles.length} file${completedFiles.length > 1 ? 's' : ''} generated successfully.`);
+                // Save the generation to past generations
+                saveGenerationToHistory(completedFiles, combinedFile);
+                
+                let message = `Audio generation completed! ${completedFiles.length} file${completedFiles.length > 1 ? 's' : ''} generated successfully.`;
+                if (combinedFile) {
+                    message += '\n\nA combined file with all parts has also been generated and is available for download.';
+                }
+                message += '\n\nThis generation has been saved to your Past Generations for future access.';
+                alert(message);
             }
         }
         
@@ -1374,6 +2046,12 @@ async function generateAudioParallel(chunks, itemsPerChunk) {
     await Promise.allSettled(generationPromises);
     
     debugLog('Parallel generation completed');
+    
+    // Generate combined file if we have multiple completed files
+    const completedFiles = generatedAudioFiles.filter(file => file.status === 'completed');
+    if (completedFiles.length > 1) {
+        await generateCombinedAudioFile(completedFiles);
+    }
 }
 
 async function generateAudioSequential(chunks, itemsPerChunk) {
@@ -1452,6 +2130,83 @@ async function generateAudioSequential(chunks, itemsPerChunk) {
     }
     
     debugLog('Sequential generation completed');
+    
+    // Generate combined file if we have multiple completed files
+    const completedFiles = generatedAudioFiles.filter(file => file.status === 'completed');
+    if (completedFiles.length > 1) {
+        await generateCombinedAudioFile(completedFiles);
+    }
+}
+
+// Generate combined audio file from all completed parts
+async function generateCombinedAudioFile(completedFiles) {
+    debugLog('Starting combined audio file generation');
+    debugLog('Number of files to combine:', completedFiles.length);
+    
+    // Create combined file entry
+    const combinedFileEntry = {
+        id: 'combined',
+        part: 'Combined',
+        totalParts: 'All',
+        items: completedFiles.reduce((total, file) => total + file.items, 0),
+        status: 'generating',
+        progress: 0,
+        audioBlob: null,
+        error: null,
+        startTime: Date.now(),
+        endTime: null,
+        isCombined: true
+    };
+    
+    generatedAudioFiles.push(combinedFileEntry);
+    updateAudioFilesUI();
+    
+    try {
+        // Update progress to show combining
+        const progressFill = elements.audioProgress.querySelector('.progress-fill');
+        const progressText = elements.audioProgress.querySelector('.progress-text');
+        if (progressFill && progressText) {
+            progressFill.style.width = '95%';
+            progressText.textContent = 'Combining all audio files...';
+        }
+        
+        // Collect all audio blobs
+        const audioBlobs = completedFiles.map(file => file.audioBlob).filter(blob => blob);
+        debugLog('Audio blobs to combine:', audioBlobs.length);
+        
+        if (audioBlobs.length === 0) {
+            throw new Error('No audio blobs available to combine');
+        }
+        
+        // Combine all audio blobs
+        const combinedBlob = await combineAudioBlobs(audioBlobs);
+        
+        if (!combinedBlob || combinedBlob.size === 0) {
+            throw new Error('Failed to create combined audio blob');
+        }
+        
+        combinedFileEntry.audioBlob = combinedBlob;
+        combinedFileEntry.status = 'completed';
+        combinedFileEntry.endTime = Date.now();
+        combinedFileEntry.progress = 100;
+        
+        debugLog('Combined audio file generated successfully');
+        debugLog('Combined file size:', combinedBlob.size);
+        
+        // Update progress to show completion
+        if (progressFill && progressText) {
+            progressFill.style.width = '100%';
+            progressText.textContent = 'Audio generation completed!';
+        }
+        
+    } catch (error) {
+        debugLog('Error generating combined audio file:', error);
+        combinedFileEntry.status = 'error';
+        combinedFileEntry.error = error.message;
+        combinedFileEntry.endTime = Date.now();
+    }
+    
+    updateAudioFilesUI();
 }
 
 function cancelAudioGeneration() {
@@ -1496,7 +2251,7 @@ function updateAudioFilesUI() {
 
 function createAudioFileElement(file) {
     const div = document.createElement('div');
-    div.className = 'audio-file-item';
+    div.className = file.isCombined ? 'audio-file-item combined-file' : 'audio-file-item';
     div.id = `audio-file-${file.id}`;
     
     const statusIcon = getStatusIcon(file.status);
@@ -1508,7 +2263,7 @@ function createAudioFileElement(file) {
         <div class="audio-file-header">
             <div class="audio-file-info">
                 <span class="status-icon ${statusClass}">${statusIcon}</span>
-                <span class="audio-file-title">Part ${file.part} of ${file.totalParts}</span>
+                <span class="audio-file-title">${file.isCombined ? 'Combined File' : `Part ${file.part} of ${file.totalParts}`}</span>
                 <span class="audio-file-details">${file.items} items</span>
                 ${duration ? `<span class="audio-file-duration">${duration}s</span>` : ''}
             </div>
@@ -1751,7 +2506,15 @@ function downloadAudio(fileId) {
         a.href = url;
         // Use appropriate file extension based on blob type
         const fileExtension = file.audioBlob.type.includes('wav') ? 'wav' : 'mp3';
-        a.download = `${currentList.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_part${file.part}_of${file.totalParts}.${fileExtension}`;
+        
+        let fileName;
+        if (file.isCombined) {
+            fileName = `${currentList.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_combined_all_parts.${fileExtension}`;
+        } else {
+            fileName = `${currentList.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_part${file.part}_of${file.totalParts}.${fileExtension}`;
+        }
+        
+        a.download = fileName;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -2256,6 +3019,17 @@ function saveToLocalStorage() {
     }
 }
 
+function savePastGenerationsToStorage() {
+    debugLog('Saving past generations to localStorage');
+    try {
+        localStorage.setItem('pastGenerations', JSON.stringify(pastGenerations));
+        debugLog('Past generations saved successfully');
+    } catch (error) {
+        console.error('Error saving past generations to localStorage:', error);
+        debugLog('Error saving past generations:', error);
+    }
+}
+
 function updateUI() {
     debugLog('updateUI called');
     debugLog('currentList:', currentList);
@@ -2301,6 +3075,8 @@ function updateDebugInfo() {
         currentList: currentList,
         currentVocabItem: currentVocabItem,
         selectedFile: selectedFile ? selectedFile.name : null,
+        apiKeyStored: !!CONFIG.OPENAI_API_KEY,
+        apiKeyLength: CONFIG.OPENAI_API_KEY ? CONFIG.OPENAI_API_KEY.length : 0,
         timestamp: new Date().toISOString()
     };
     
@@ -2310,6 +3086,7 @@ function updateDebugInfo() {
     const storageData = {
         vocabLists: localStorage.getItem('vocabLists'),
         parsedVocabLists: JSON.parse(localStorage.getItem('vocabLists') || '[]'),
+        apiKey: localStorage.getItem('openai_api_key') ? '***' + localStorage.getItem('openai_api_key').slice(-4) : null,
         localStorageKeys: Object.keys(localStorage),
         timestamp: new Date().toISOString()
     };
@@ -2327,11 +3104,36 @@ function clearLocalStorage() {
         currentList = null;
         currentVocabItem = null;
         selectedFile = null;
+        CONFIG.OPENAI_API_KEY = null; // Clear API key from config
         renderVocabLists();
         updateDebugInfo();
         debugLog('LocalStorage cleared');
         alert('All stored data has been cleared.');
     }
+}
+
+// Update parallel processing configuration from UI
+function updateParallelProcessingConfig() {
+    CONFIG.PARALLEL_PROCESSING.ENABLED = elements.enableParallelProcessing.checked;
+    CONFIG.PARALLEL_PROCESSING.MAX_CONCURRENT_OCR = parseInt(elements.maxConcurrentOCR.value) || 4;
+    CONFIG.PARALLEL_PROCESSING.MAX_CONCURRENT_CHATGPT = parseInt(elements.maxConcurrentChatGPT.value) || 8;
+    CONFIG.PARALLEL_PROCESSING.CHUNK_SIZE = parseInt(elements.chunkSize.value) || 3000;
+    
+    // Update rate limiter with new ChatGPT limit
+    chatGPTRateLimiter.maxRequests = CONFIG.PARALLEL_PROCESSING.MAX_CONCURRENT_CHATGPT;
+    
+    debugLog('Parallel processing configuration updated:', CONFIG.PARALLEL_PROCESSING);
+}
+
+// Initialize parallel processing configuration from UI
+function initParallelProcessingConfig() {
+    // Set initial values from UI
+    elements.enableParallelProcessing.checked = CONFIG.PARALLEL_PROCESSING.ENABLED;
+    elements.maxConcurrentOCR.value = CONFIG.PARALLEL_PROCESSING.MAX_CONCURRENT_OCR;
+    elements.maxConcurrentChatGPT.value = CONFIG.PARALLEL_PROCESSING.MAX_CONCURRENT_CHATGPT;
+    elements.chunkSize.value = CONFIG.PARALLEL_PROCESSING.CHUNK_SIZE;
+    
+    debugLog('Parallel processing configuration initialized from UI');
 }
 
 // Initialize when DOM is loaded

@@ -11,8 +11,17 @@
 <body>
     <div class="container">
         <header>
-            <h1><i class="fas fa-language"></i> Dutch Vocabulary Generator</h1>
-            <p>Learn Dutch vocabulary with audio in Turkish and Russian</p>
+            <div class="header-content">
+                <div class="header-left">
+                    <h1><i class="fas fa-language"></i> Dutch Vocabulary Generator</h1>
+                    <p>Learn Dutch vocabulary with audio in Turkish and Russian</p>
+                </div>
+                <div class="header-right">
+                    <button id="settingsBtn" class="btn btn-secondary" title="Settings">
+                        <i class="fas fa-cog"></i> Settings
+                    </button>
+                </div>
+            </div>
         </header>
 
         <main>
@@ -50,6 +59,28 @@
                             <input type="checkbox" id="useOCR" checked>
                             Use Advanced OCR (for image-based PDFs)
                         </label>
+                        <div class="parallel-processing-options">
+                            <h4>Parallel Processing Options</h4>
+                            <div class="parallel-controls">
+                                <label>
+                                    <input type="checkbox" id="enableParallelProcessing" checked>
+                                    Enable Parallel Processing
+                                </label>
+                                <div class="parallel-settings">
+                                    <label for="maxConcurrentOCR">Max OCR Workers:</label>
+                                    <input type="number" id="maxConcurrentOCR" value="4" min="1" max="8" step="1" style="width: 60px;">
+                                    <span style="font-size: 0.9rem; color: #718096;">(1-8)</span>
+                                    
+                                    <label for="maxConcurrentChatGPT">Max AI Workers:</label>
+                                    <input type="number" id="maxConcurrentChatGPT" value="8" min="1" max="16" step="1" style="width: 60px;">
+                                    <span style="font-size: 0.9rem; color: #718096;">(1-16)</span>
+                                    
+                                    <label for="chunkSize">Text Chunk Size:</label>
+                                    <input type="number" id="chunkSize" value="3000" min="1000" max="5000" step="500" style="width: 80px;">
+                                    <span style="font-size: 0.9rem; color: #718096;">(1000-5000 chars)</span>
+                                </div>
+                            </div>
+                        </div>
                         <button id="extractBtn" class="btn btn-secondary" disabled>
                             <i class="fas fa-magic"></i> Extract Vocabulary
                         </button>
@@ -134,6 +165,24 @@
                     <div id="audioFilesList" class="audio-files-list">
                         <!-- Generated audio files will be displayed here -->
                     </div>
+                </div>
+            </section>
+
+            <!-- Past Generations Section -->
+            <section class="past-generations-section">
+                <div class="section-header">
+                    <h2><i class="fas fa-history"></i> Past Generations</h2>
+                    <div class="past-generations-actions">
+                        <button id="refreshPastGenerationsBtn" class="btn btn-secondary">
+                            <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                        <button id="clearPastGenerationsBtn" class="btn btn-secondary">
+                            <i class="fas fa-trash"></i> Clear All
+                        </button>
+                    </div>
+                </div>
+                <div id="pastGenerationsList" class="past-generations-list">
+                    <!-- Past generations will be displayed here -->
                 </div>
             </section>
         </main>
@@ -246,6 +295,41 @@
             <div class="modal-footer">
                 <button id="processManualTextBtn" class="btn btn-primary">Process Text</button>
                 <button id="cancelManualBtn" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="settingsModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-cog"></i> Settings</h3>
+                <button class="close-btn" id="closeSettingsModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="apiKeyInput">OpenAI API Key:</label>
+                    <div class="api-key-container">
+                        <input type="password" id="apiKeyInput" placeholder="Enter your OpenAI API key">
+                        <button id="toggleApiKeyVisibility" class="btn btn-secondary btn-sm" title="Show/Hide API Key">
+                            <i class="fas fa-eye"></i>
+                        </button>
+                    </div>
+                    <p style="font-size: 0.9rem; color: #718096; margin-top: 5px;">
+                        Your API key is stored locally and never sent to our servers. 
+                        <a href="https://platform.openai.com/api-keys" target="_blank" style="color: #4299e1;">Get your API key here</a>
+                    </p>
+                </div>
+                <div class="form-group">
+                    <label for="apiKeyStatus">Status:</label>
+                    <div id="apiKeyStatus" class="api-key-status">
+                        <span class="status-indicator" id="apiKeyStatusIndicator"></span>
+                        <span id="apiKeyStatusText">Checking...</span>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="saveSettingsBtn" class="btn btn-primary">Save Settings</button>
+                <button id="cancelSettingsBtn" class="btn btn-secondary">Cancel</button>
             </div>
         </div>
     </div>

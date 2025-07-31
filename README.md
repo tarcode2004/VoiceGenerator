@@ -9,6 +9,9 @@ A web application for generating audio from vocabulary lists using OpenAI's Text
 - Generate audio files from vocabulary lists
 - Support for multiple languages (Dutch, Turkish, Russian)
 - Manual text input for vocabulary extraction
+- **Parallel processing for faster extraction** (OCR and AI processing)
+- Configurable parallel processing settings
+- Rate limiting for API calls
 
 ## Setup
 
@@ -30,6 +33,11 @@ A web application for generating audio from vocabulary lists using OpenAI's Text
    - Click "Upload PDF" and select a PDF file
    - Choose whether to include Russian translations
    - Enable OCR if the PDF contains images or scanned text
+   - **Configure parallel processing settings** (optional):
+     - Enable/disable parallel processing
+     - Set max OCR workers (1-8)
+     - Set max AI workers (1-16)
+     - Adjust text chunk size (1000-5000 characters)
    - Click "Extract Vocabulary"
 
 2. **Manual Input**
@@ -68,6 +76,10 @@ A web application for generating audio from vocabulary lists using OpenAI's Text
 - **API Key Error**: Make sure your API key is valid and you have credits
 - **PDF Extraction Issues**: Try enabling OCR for scanned documents
 - **Audio Generation Fails**: Check your internet connection and API key validity
+- **Parallel Processing Issues**: 
+  - Reduce the number of concurrent workers if you experience timeouts
+  - For large PDFs, increase chunk size to reduce the number of API calls
+  - Monitor your OpenAI API rate limits
 
 ## File Structure
 
