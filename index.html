@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dutch Vocabulary Generator</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><i class="fas fa-language"></i> Dutch Vocabulary Generator</h1>
+            <p>Learn Dutch vocabulary with audio in Turkish and Russian</p>
+        </header>
+
+        <main>
+            <!-- Vocabulary Lists Section -->
+            <section class="vocab-lists-section">
+                <div class="section-header">
+                    <h2><i class="fas fa-list"></i> Vocabulary Lists</h2>
+                    <button id="createListBtn" class="btn btn-primary">
+                        <i class="fas fa-plus"></i> Create New List
+                    </button>
+                </div>
+                
+                <div id="vocabLists" class="vocab-lists">
+                    <!-- Lists will be populated here -->
+                </div>
+            </section>
+
+            <!-- PDF Upload Section -->
+            <section class="pdf-upload-section">
+                <div class="section-header">
+                    <h2><i class="fas fa-file-pdf"></i> Upload PDF</h2>
+                </div>
+                <div class="upload-container">
+                    <div class="upload-area" id="uploadArea">
+                        <i class="fas fa-cloud-upload-alt"></i>
+                        <p>Drag & drop a PDF file here or click to browse</p>
+                        <input type="file" id="pdfInput" accept=".pdf" hidden>
+                    </div>
+                    <div class="upload-options">
+                        <label>
+                            <input type="checkbox" id="includeRussian" checked>
+                            Include Russian translations
+                        </label>
+                        <label>
+                            <input type="checkbox" id="useOCR" checked>
+                            Use Advanced OCR (for image-based PDFs)
+                        </label>
+                        <button id="extractBtn" class="btn btn-secondary" disabled>
+                            <i class="fas fa-magic"></i> Extract Vocabulary
+                        </button>
+                        <button id="manualInputBtn" class="btn btn-secondary">
+                            <i class="fas fa-keyboard"></i> Manual Input
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Audio Generation Section -->
+            <section class="audio-generation-section">
+                <div class="section-header">
+                    <h2><i class="fas fa-volume-up"></i> Audio Generation</h2>
+                </div>
+                <div class="audio-controls">
+                    <div class="voice-selection">
+                        <label for="dutchVoice">Dutch Voice:</label>
+                        <select id="dutchVoice">
+                            <option value="nova">Nova</option>
+                            <option value="coral">Coral</option>
+                            <option value="alloy">Alloy</option>
+                            <option value="echo">Echo</option>
+                        </select>
+                        
+                        <label for="turkishVoice">Turkish Voice:</label>
+                        <select id="turkishVoice">
+                            <option value="coral">Coral</option>
+                            <option value="nova">Nova</option>
+                            <option value="alloy">Alloy</option>
+                            <option value="echo">Echo</option>
+                        </select>
+                        
+                        <label for="russianVoice">Russian Voice:</label>
+                        <select id="russianVoice">
+                            <option value="echo">Echo</option>
+                            <option value="coral">Coral</option>
+                            <option value="nova">Nova</option>
+                            <option value="alloy">Alloy</option>
+                        </select>
+                        
+                        <label for="audioChunkSize">Vocabulary Items per File:</label>
+                        <input type="number" id="audioChunkSize" value="30" min="1" max="200" step="1" style="width: 80px;">
+                        <span style="font-size: 0.9rem; color: #718096;">(1-200 items)</span>
+                        
+                        <label for="generationMode">Generation Mode:</label>
+                        <select id="generationMode">
+                            <option value="parallel">Parallel (faster, all at once)</option>
+                            <option value="sequential">Sequential (one by one)</option>
+                        </select>
+                        
+                        <label for="audioLanguageMode">Audio Language Mode:</label>
+                        <select id="audioLanguageMode">
+                            <option value="single">Single Language (current - all in Dutch voice)</option>
+                            <option value="multi">Multi-Language (separate voices for each language)</option>
+                        </select>
+                        <span style="font-size: 0.9rem; color: #718096;">(Multi-language provides better pronunciation)</span>
+                    </div>
+                    <button id="generateAudioBtn" class="btn btn-success" disabled>
+                        <i class="fas fa-play"></i> Generate Audio
+                    </button>
+                </div>
+                <div id="audioProgress" class="audio-progress hidden">
+                    <div class="progress-bar">
+                        <div class="progress-fill"></div>
+                    </div>
+                    <p class="progress-text">Generating audio...</p>
+                    <button id="cancelGenerationBtn" class="btn btn-secondary" style="margin-top: 10px;">
+                        <i class="fas fa-stop"></i> Cancel Generation
+                    </button>
+                </div>
+                <div id="ocrProgress" class="audio-progress hidden">
+                    <div class="progress-bar">
+                        <div class="progress-fill"></div>
+                    </div>
+                    <p class="progress-text">Processing with OCR...</p>
+                </div>
+                
+                <!-- Audio Results Panel -->
+                <div id="audioResults" class="audio-results hidden">
+                    <h3>Generated Audio Files</h3>
+                    <div id="audioFilesList" class="audio-files-list">
+                        <!-- Generated audio files will be displayed here -->
+                    </div>
+                </div>
+            </section>
+        </main>
+        
+        <!-- Debug Panel (only visible when DEBUG is true) -->
+        <div id="debugPanel" class="debug-panel hidden">
+            <h3>Debug Information</h3>
+            <div class="debug-content">
+                <div class="debug-section">
+                    <h4>Current State</h4>
+                    <pre id="debugState"></pre>
+                </div>
+                <div class="debug-section">
+                    <h4>Local Storage</h4>
+                    <pre id="debugStorage"></pre>
+                </div>
+                <button id="refreshDebugBtn" class="btn btn-secondary">Refresh Debug Info</button>
+                <button id="clearStorageBtn" class="btn btn-secondary">Clear Storage</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div id="listModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">Create New Vocabulary List</h3>
+                <button class="close-btn" id="closeListModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="listTitle">List Title:</label>
+                    <input type="text" id="listTitle" placeholder="Enter list title">
+                </div>
+                <div class="form-group">
+                    <label for="listDescription">Description (optional):</label>
+                    <textarea id="listDescription" placeholder="Enter description"></textarea>
+                </div>
+                <div class="vocab-items">
+                    <h4>Vocabulary Items</h4>
+                    <div id="vocabItems">
+                        <!-- Vocabulary items will be added here -->
+                    </div>
+                    <button id="addVocabItemBtn" class="btn btn-secondary">
+                        <i class="fas fa-plus"></i> Add Word
+                    </button>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="saveListBtn" class="btn btn-primary">Save List</button>
+                <button id="cancelListBtn" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="vocabItemModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Edit Vocabulary Item</h3>
+                <button class="close-btn" id="closeVocabModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="dutchWord">Dutch Word:</label>
+                    <input type="text" id="dutchWord" placeholder="Enter Dutch word">
+                </div>
+                <div class="form-group">
+                    <label for="turkishTranslation">Turkish Translation:</label>
+                    <input type="text" id="turkishTranslation" placeholder="Enter Turkish translation">
+                </div>
+                <div class="form-group">
+                    <label for="russianTranslation">Russian Translation:</label>
+                    <input type="text" id="russianTranslation" placeholder="Enter Russian translation">
+                </div>
+                <div class="form-group">
+                    <label for="dutchSentence">Dutch Example Sentence:</label>
+                    <textarea id="dutchSentence" placeholder="Enter example sentence in Dutch"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="alternateMeanings">Alternate Meanings (Turkish):</label>
+                    <textarea id="alternateMeanings" placeholder="Enter alternate meanings in Turkish"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="elaboration">Brief Elaboration:</label>
+                    <textarea id="elaboration" placeholder="Enter brief elaboration"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="saveVocabItemBtn" class="btn btn-primary">Save</button>
+                <button id="cancelVocabItemBtn" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="manualInputModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Manual Text Input</h3>
+                <button class="close-btn" id="closeManualModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="manualText">Paste the text from your PDF here:</label>
+                    <textarea id="manualText" rows="15" placeholder="Paste the vocabulary text from your PDF here..."></textarea>
+                </div>
+                <p style="font-size: 0.9rem; color: #718096;">
+                    <strong>Instructions:</strong> Copy the text from your PDF and paste it here. The system will extract vocabulary from the pasted text.
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button id="processManualTextBtn" class="btn btn-primary">Process Text</button>
+                <button id="cancelManualBtn" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="script.js"></script>
+    
+    <!-- Debug Toggle Button -->
+    <button id="debugToggle" class="debug-toggle" title="Toggle Debug Panel">
+        <i class="fas fa-bug"></i>
+    </button>
+</body>
+</html> 

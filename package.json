@@ -1,0 +1,27 @@
+{
+  "name": "dutch-vocabulary-generator",
+  "version": "1.0.0",
+  "description": "A locally runnable web application for generating Dutch vocabulary MP3 files with Turkish and Russian translations",
+  "main": "index.html",
+  "scripts": {
+    "start": "http-server -p 8000 -o",
+    "dev": "http-server -p 8000 -o -c-1"
+  },
+  "keywords": [
+    "dutch",
+    "vocabulary",
+    "language-learning",
+    "audio",
+    "tts",
+    "openai"
+  ],
+  "author": "Dutch Vocabulary Generator",
+  "license": "MIT",
+  "devDependencies": {
+    "http-server": "^14.1.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "local"
+  }
+} 
